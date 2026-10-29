@@ -1,0 +1,2 @@
+# Keep LF line endings so gofmt checks pass on CI regardless of the OS used to commit.
+* text=auto eol=lf

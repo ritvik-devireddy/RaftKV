@@ -1,0 +1,21 @@
+# Binaries
+/bin/
+*.exe
+*.test
+*.out
+
+# Runtime data
+/data/
+*.wal
+*.snap
+
+# Test and profiling output
+coverage.txt
+*.prof
+/test/linearizability/*.html
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
