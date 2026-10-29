@@ -17,6 +17,9 @@ type NodeID int
 // NoVote is the VotedFor value meaning "has not voted in this term".
 const NoVote NodeID = -1
 
+// NoLeader is the leader ID meaning "this node does not know who the leader is".
+const NoLeader NodeID = -1
+
 // Term is a Raft election term.
 type Term uint64
 
@@ -107,7 +110,8 @@ type Message struct {
 
 // Transport sends a message to another node. Delivery is best-effort: the
 // network may drop, delay, duplicate or reorder messages, and Raft must stay
-// correct regardless.
+// correct regardless. Send is called with the node's lock held, so it must
+// not block and must not call back into the node; queue the message and return.
 type Transport interface {
 	Send(msg Message)
 }

@@ -67,10 +67,3 @@ func TestMemoryStorageRoundTrip(t *testing.T) {
 		t.Errorf("round trip mismatch: %+v", got)
 	}
 }
-
-// TestElectsSingleLeader is the first target for Phase 1. Un-skip it once
-// elections work: run a 3-node cluster on simnet for many seeds and assert
-// that there is never more than one leader in any term.
-func TestElectsSingleLeader(t *testing.T) {
-	t.Skip("phase 1: leader election not implemented yet")
-}
