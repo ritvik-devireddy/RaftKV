@@ -4,7 +4,7 @@
 
 A linearizable key-value store built on a from-scratch Raft implementation in Go, with a deterministic chaos-testing harness.
 
-> **Status: work in progress.** The scaffolding, the simulated network, and the KV state machine exist. Raft itself is being built phase by phase (see the [roadmap](#roadmap)).
+> **Status: work in progress.** Leader election works and is tested across hundreds of seeded failure scenarios. Log replication, durability, and the network API are next (see the [roadmap](#roadmap)).
 
 ## What it is
 
@@ -66,7 +66,7 @@ go test -race ./...
 ## Roadmap
 
 - [x] **Phase 0: setup.** Repo layout, CI, simulated network, KV state machine with dedup
-- [ ] **Phase 1: elections.** Terms, votes, timeouts; one leader per term under partitions
+- [x] **Phase 1: elections.** Terms, votes, randomized timeouts, heartbeats; at most one leader per term under message loss and partitions
 - [ ] **Phase 2: replication.** AppendEntries, commit index, follower catch-up
 - [ ] **Phase 3: durability.** Checksummed WAL, crash recovery, persisted term/vote/log
 - [ ] **Phase 4: real API.** gRPC and Protobuf, CLI client, Docker Compose cluster
