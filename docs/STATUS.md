@@ -2,7 +2,7 @@
 
 This file is the full context for continuing the project in a new session. It is written for an AI pair-programmer (Claude) picking the work up cold, and doubles as an engineering log. Read it end to end before changing anything.
 
-Last updated: end of Phase 4 setup (2026-10-31).
+Last updated: Phase 4 complete (2026-10-31).
 
 ## 1. What this is and why
 
@@ -29,16 +29,13 @@ The project's selling point is not "implements Raft" but "demonstrably correct u
 | 1 | Leader election | done, pushed |
 | 2 | Log replication, commit, Figure 8 rule, no-op on election | done, pushed (55c1ae8) |
 | 3 | Durability: WAL, crash recovery, crash injection | done, pushed (7843ff7), CI green |
-| 4 | gRPC API, server binary, CLI, Docker Compose | **code written, builds and vets on his machine with real gRPC; tests and live demo not yet confirmed; not committed** |
+| 4 | gRPC API, server binary, CLI, Docker Compose | done, pushed (88e9122 plus doc update); all tests pass with `-race` on his machine; live 3-node demo verified (put/get, kill leader, writes continue, restarted node recovers from WAL and catches up) |
 | 5 | Porcupine linearizability, thousands of seeded chaos runs | not started |
 | 6 | Snapshots and log compaction, benchmarks, README diagram, design-doc polish | not started |
 
-### Phase 4 verification checklist (pick up here if not done)
-1. `go test -race -count=1 ./...` all `ok` (new: `internal/server`, `internal/rpc` convert test, `internal/kv` codec).
-2. `git status`; `go mod tidy` raised go.mod to `go 1.26.0` (grpc v1.85 requires it); the Dockerfile base image was updated to `golang:1.26` to match, and CI follows go.mod automatically.
-3. Live demo: three terminals running `go run ./cmd/raftkv-server -id N -listen :700(N+1) -data data/nodeN -peers localhost:7001,localhost:7002,localhost:7003`, then `go run ./cmd/raftkv-cli put hello world` / `get hello`; kill the leader, confirm a new leader and the data survive, restart the node, confirm catch-up.
-4. Optional: `docker compose up --build` (needs Docker Desktop; not confirmed installed).
-5. Update README (status text, roadmap `[x]` for Phase 4, "Getting started" with the demo and proto regeneration commands) and `docs/design.md` (Server layer, proto decision), then commit generated code in `api/raftkvpb/` (it must be committed or CI cannot build) together with `go.mod` and `go.sum`.
+### Phase 4 status
+Complete. Verified: all tests pass with `-race` on Windows; a 3-node cluster ran locally via `go run`, `put`/`get` worked, killing the leader left reads and writes working, and the restarted node logged `term=5 log_len=3` (recovered from its WAL) and rejoined as a follower. Not verified: `docker compose up --build` (Docker not confirmed installed). `go mod tidy` raised go.mod to `go 1.26.0` (grpc v1.85 requires it); the Dockerfile uses `golang:1.26` and CI follows go.mod.
+Observed in the demo: a restarted node campaigned through terms 6 and 7 and forced an extra election. This is the known no-PreVote disruption (Raft thesis section 9.6); documented in `docs/design.md`, candidate Phase 6 item.
 
 ## 4. Architecture
 
@@ -112,4 +109,4 @@ Implemented Raft (election, replication, commit rules incl. Figure 8) from scrat
 
 ## 10. Starting prompt for a new session
 
-> Read `docs/STATUS.md` in the RaftKV repo (C:\SWEProjects\RaftKV) and continue: first finish the Phase 4 verification checklist, then start Phase 5.
+> Read `docs/STATUS.md` in the RaftKV repo (C:\SWEProjects\RaftKV) and start Phase 5.

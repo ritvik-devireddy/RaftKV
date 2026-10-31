@@ -47,6 +47,18 @@ Code is in `internal/storage` (the WAL) and `internal/raft/storage.go` (the inte
 - **Torn tail versus corruption.** A crash can leave the final record half-written, which recovery discards and cuts off. Damage anywhere else must not be skipped, because dropping committed history could break safety. The rule: a record that runs past the end of the file is torn; a checksum mismatch is torn only if nothing but zeros follows it (if later bytes are non-zero, a later write completed, so this record was damaged after being written); a zero length is torn only if the rest of the file is zeros. Everything else, including a valid record with impossible contents (an index gap, a term going backwards), is `ErrCorrupt`.
 - **Known limitation.** Damage to a middle record's length field that makes it look like it runs past the end of the file is indistinguishable from a torn tail, so recovery treats it as one and discards the rest of the log. A real system would add a per-file header or footer checksum, or sync a commit marker, to tell them apart.
 
+## Server layer and API
+
+Code is in `internal/server` (logic), `internal/rpc` (gRPC adapters), `internal/client`.
+
+- **The server layer has no gRPC in it.** `server.Server` joins a Raft node to the KV store and exposes `Submit`/`Execute`; gRPC is a thin adapter over it. That keeps everything interesting running on the deterministic simulated network: the commit-waiting and redirect logic is tested with the same seeded failure injection as the Raft core.
+- **Waiting for commit.** `Submit` proposes the command and registers a waiter keyed by the log index it landed at, remembering the term of the proposal. When that index is applied, the waiter gets the result only if the applied entry has the same term; otherwise a different entry replaced the proposal and the client is told `ErrLostLeadership`. This includes the case where a new leader's no-op lands at that index. A bug where waiters were not completed for no-ops was found by `TestDeposedLeadersPendingCommandFails`.
+- **A leader that cannot commit never says so.** A leader cut off from a majority keeps its entries forever, so every wait is bounded by the request timeout. The client then retries with the same `(ClientID, Seq)`, and the store's dedup makes the retry safe whether or not the first attempt committed.
+- **Reads go through the log** (same path as writes), so they are linearizable at the cost of a log round trip.
+- **Node-to-node wire protocol.** The Raft core treats a reply as an independent message that may be lost, late, or duplicated, so the wire protocol is one fire-and-forget `Raft.Step(RaftMessage)` RPC with a `oneof` payload, rather than request/response pairs. The sender never blocks: each peer has a bounded queue and a message that does not fit is dropped, which Raft's retransmission tolerates. This matters because the node holds its lock while sending.
+- **Redirects.** A non-leader answers with the address it believes the leader has (`-client-addrs` lets nodes advertise addresses clients can actually reach, which differ from in-cluster addresses under Docker).
+- **Known gap: no PreVote.** A node that rejoins with an out-of-date log can bump its term by campaigning and force an extra election (observed in the live demo: a restarted node went through terms 6 and 7 before the cluster settled). The Raft thesis (section 9.6) describes PreVote to prevent this; a candidate-to-be first asks whether it would win before incrementing its term.
+
 ## Client semantics
 
 - **Linearizable reads.** Reads go through the log, so they observe all earlier committed writes. Possible later optimization: read leases or ReadIndex, with the tradeoffs written down.
