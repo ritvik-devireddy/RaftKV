@@ -59,6 +59,20 @@ Code is in `internal/server` (logic), `internal/rpc` (gRPC adapters), `internal/
 - **Redirects.** A non-leader answers with the address it believes the leader has (`-client-addrs` lets nodes advertise addresses clients can actually reach, which differ from in-cluster addresses under Docker).
 - **Known gap: no PreVote.** A node that rejoins with an out-of-date log can bump its term by campaigning and force an extra election (observed in the live demo: a restarted node went through terms 6 and 7 before the cluster settled). The Raft thesis (section 9.6) describes PreVote to prevent this; a candidate-to-be first asks whether it would win before incrementing its term.
 
+## Linearizability checking
+
+Code is in `internal/chaos` (the simulated world and its clients) and `test/linearizability` (the Porcupine model and the tests).
+
+- **What is checked.** Each run builds a cluster of real `server.Server` nodes on the simulated network, with 3 or 5 nodes, 4 clients, and a small key space (2 keys, so operations contend). While clients issue Put/Get/Delete/CAS, the world drops messages, partitions the network (including cutting off the current leader), and crashes nodes at arbitrary storage operations before restarting them from their storage alone. Every client operation is recorded with its call and return time in virtual nanoseconds, and the history is checked against a sequential model of the store with [Porcupine](https://github.com/anishathalye/porcupine).
+- **Indeterminate operations.** If a client never learns the outcome (it gives up after a timeout, or walks away right after sending), the command may or may not have taken effect, at any time after it was called. Such an operation is recorded with an infinite return time and an output the model accepts. It is never recorded as "did not happen": a timed-out write that actually committed is exactly the case a checker must not paper over.
+- **Retries are safe because of dedup.** A client reuses one `(ClientID, Seq)` for every retry of an operation, so a command that committed but whose reply was lost is not applied twice. Each client has one operation in flight, because the store keeps only the last result per client.
+- **Per-key partitioning.** Keys are independent in the model, so each key's history is checked separately, which keeps the search small enough to run hundreds of seeds in seconds.
+- **Reproducibility.** The same seed gives the same history (`TestRunsAreDeterministic`). A failing seed prints its replay command and writes Porcupine's HTML visualization to `test/linearizability/failure-seed-N.html` (git-ignored). `RAFTKV_CHAOS_SEEDS` and `RAFTKV_CHAOS_FIRST_SEED` choose how many seeds to run and where to start; CI runs 200 by default.
+- **The checker can fail.** A checker that has never failed proves nothing, so the tests break the system on purpose and require a violation to be reported:
+  - harness-level bugs (`TestCheckerCatchesStaleReads`: reads served from a node's local state instead of the log; `TestCheckerCatchesMissingDedup`: retries applied twice);
+  - bugs injected into the real code in a scratch copy, each caught by the chaos test within a few seeds: committing with less than a majority, granting votes without the log up-to-date check, completing a waiting client with a different entry's result (skipping the term check in `server.apply`), and the dedup cache returning the wrong result.
+- **What chaos does not find, and why both kinds of test exist.** Removing the Figure 8 rule (letting a leader commit an entry from an older term by counting replicas) survived 3,000 chaos seeds undetected, while the targeted unit test `TestLeaderCommitsOnlyCurrentTermEntriesByCounting` catches it immediately. The anomaly needs a very specific sequence of leader crashes that random chaos on small clusters, with a no-op appended at the start of every term, almost never produces. Random testing finds bugs nobody thought of; targeted tests pin the ones people know about.
+
 ## Client semantics
 
 - **Linearizable reads.** Reads go through the log, so they observe all earlier committed writes. Possible later optimization: read leases or ReadIndex, with the tradeoffs written down.
@@ -82,7 +96,7 @@ Add a row for every bug, with the seed that reproduces it and the regression tes
 
 | # | Symptom | Root cause | Seed | Regression test |
 |---|---------|-----------|------|-----------------|
-| | | | | |
+| 1 | A client whose leader was deposed and whose entry was replaced waited forever instead of being told the command failed | `server.apply` returned early for no-op entries, so a waiter registered at an index that a new leader's no-op took over was never completed | 1 (deterministic scenario) | `TestDeposedLeadersPendingCommandFails` |
 
 ## Benchmarks
 

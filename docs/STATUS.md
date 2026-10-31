@@ -2,7 +2,7 @@
 
 This file is the full context for continuing the project in a new session. It is written for an AI pair-programmer (Claude) picking the work up cold, and doubles as an engineering log. Read it end to end before changing anything.
 
-Last updated: Phase 4 complete (2026-10-31).
+Last updated: Phase 5 code complete, awaiting first run on the real Porcupine library (2026-10-31).
 
 ## 1. What this is and why
 
@@ -30,7 +30,7 @@ The project's selling point is not "implements Raft" but "demonstrably correct u
 | 2 | Log replication, commit, Figure 8 rule, no-op on election | done, pushed (55c1ae8) |
 | 3 | Durability: WAL, crash recovery, crash injection | done, pushed (7843ff7), CI green |
 | 4 | gRPC API, server binary, CLI, Docker Compose | done, pushed (88e9122 plus doc update); all tests pass with `-race` on his machine; live 3-node demo verified (put/get, kill leader, writes continue, restarted node recovers from WAL and catches up) |
-| 5 | Porcupine linearizability, thousands of seeded chaos runs | not started |
+| 5 | Porcupine linearizability, seeded chaos runs | code written; passes against a local stand-in for Porcupine (same API, own search); **needs the first run against the real library on Ritvik's machine** |
 | 6 | Snapshots and log compaction, benchmarks, README diagram, design-doc polish | not started |
 
 ### Phase 4 status
@@ -90,16 +90,13 @@ clients ── gRPC KV service ──► internal/rpc.KVService
 - gRPC uses insecure credentials (no TLS/auth); fine for a demo, say so in the README.
 - Server restarts rebuild the store by re-applying the log once the commit index is relearned (a restarted single node must win an election first).
 
-## 7. Phase 5 plan (next major piece): prove linearizability
+## 7. Phase 5 (built): linearizability checking
 
-Goal: thousands of seeded chaos runs, each producing a client-visible history that Porcupine checks.
-- Dependency: `go get github.com/anishathalye/porcupine` (Ritvik must run this; Claude cannot download modules). Build the model and history recorder in a package that imports Porcupine only in the test/linearizability code, so the rest stays buildable and testable in Claude's container; type-check against a stub if needed.
-- Harness: extend the existing cluster pattern to `server.Server` nodes (with `crashStorage`, partitions, drops, delays, restarts) on simnet. Clients are step-driven state machines, not goroutines, so runs stay deterministic: each client has at most one op in flight, uses `Submit` with one `(ClientID, Seq)` per logical op, retries (same pair) on `ErrLostLeadership`, timeouts, and redirects, and picks a new node.
-- History recording in virtual time: invoke time at first send, return time at the response. An op that never gets a definitive answer must be recorded as indeterminate (return time = infinity), because it may or may not have taken effect. Never record a failed attempt as "did not happen".
-- Model: per-key partitioned register with Put/Get/Delete/CAS, matching `kv.Store` semantics (`Result.OK` meanings in `internal/kv/store.go`). Use Porcupine's `Partition` by key for speed.
-- Output: on a violation, print the seed and the exact replay command, and write Porcupine's HTML visualization to `test/linearizability/*.html` (already gitignored). Make the seed count configurable (env var or flag), small by default for CI, large for local soak runs.
-- Mutation-test the whole pipeline: break the Raft code on purpose (e.g. serve reads from a stale leader without going through the log, commit without a majority, skip the dedup) and confirm Porcupine flags a violation. A checker that cannot fail proves nothing.
-- Add real bugs found to the table in `docs/design.md` with seed and regression test.
+- `internal/chaos`: `World` runs real `server.Server` nodes on simnet with fault-injecting storage, partitions (random splits and leader isolation), crash/restart, and message loss; step-driven clients (one operation in flight each, one `(ClientID, Seq)` reused across retries) record `Op{Call, Return, Result, Done}` in virtual nanoseconds. `Done=false` means the outcome is unknown (client gave up or walked away): it may or may not have happened. Deterministic per seed (`TestRunsAreDeterministic`). Deliberate-bug options `StaleReads` and `NoDedup` exist for validating the checker.
+- `test/linearizability`: `model.go` is the per-key Porcupine model (partitioned by key; unknown outcomes get return time MaxInt64 and an always-accepted output); `chaos_test.go` has `TestLinearizableUnderChaos` (default 200 seeds; env `RAFTKV_CHAOS_SEEDS` / `RAFTKV_CHAOS_FIRST_SEED`), two tests that require the checker to flag a deliberately broken system, and `TestModelOnHandWrittenHistories` (14 small histories).
+- Validation done in the container against a local stand-in for Porcupine (same API, memoized DFS), not the real library: 200+ seeds linearizable; both harness-level bugs caught; real-code mutations caught within a few seeds (commit without majority, votes ignoring log recency, server waiter ignoring terms, dedup returning wrong result). The Figure 8 mutant survived 3,000 chaos seeds and is caught only by the targeted unit test (documented in `docs/design.md`).
+- **Pending on Ritvik's machine:** `go get github.com/anishathalye/porcupine && go mod tidy`, then `go test -race -count=1 ./...`. If the real library behaves differently from the stand-in (API mismatch, or the real checker reports a violation the stand-in missed), treat it as the interesting result and investigate that seed first.
+- Possible extensions: more fault types (message duplication/reordering is partly covered by simnet delays; add clock skew only if timeouts ever depend on wall time), longer soak runs, history of operations across leader restarts with larger clusters.
 
 ## 8. Phase 6 plan
 Snapshots and log compaction (state machine snapshot incl. dedup sessions; `InstallSnapshot` message; WAL compaction/rotation), benchmarks (throughput, p50/p99 latency for 1/3/5 nodes, time to elect after killing the leader; state hardware and what bounded each number), README architecture diagram, design-doc polish, optional TLS.
@@ -109,4 +106,4 @@ Implemented Raft (election, replication, commit rules incl. Figure 8) from scrat
 
 ## 10. Starting prompt for a new session
 
-> Read `docs/STATUS.md` in the RaftKV repo (C:\SWEProjects\RaftKV) and start Phase 5.
+> Read `docs/STATUS.md` in the RaftKV repo (C:\SWEProjects\RaftKV) and continue: confirm Phase 5 passes with the real Porcupine library, then start Phase 6.

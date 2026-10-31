@@ -4,7 +4,7 @@
 
 A linearizable key-value store built on a from-scratch Raft implementation in Go, with a deterministic chaos-testing harness.
 
-> **Status: work in progress.** A three-node cluster runs over gRPC with a CLI client. Leader election, log replication, and crash-safe durable storage are tested across hundreds of seeded failure scenarios (message loss, partitions, stale leaders, nodes crashing at arbitrary points). The linearizability proof (Porcupine) is next (see the [roadmap](#roadmap)).
+> **Status: work in progress.** A three-node cluster runs over gRPC with a CLI client. Leader election, log replication, and crash-safe durable storage are tested across hundreds of seeded failure scenarios (message loss, partitions, stale leaders, nodes crashing at arbitrary points). Recorded client histories from seeded chaos runs are checked for linearizability with Porcupine (see the [roadmap](#roadmap)). Snapshots and benchmarks are next.
 
 ## What it is
 
@@ -49,7 +49,8 @@ internal/client/         leader-finding client with safe retries
 internal/simnet/         deterministic simulated network
 internal/storage/        write-ahead log (snapshots planned)
 internal/kv/             key-value state machine with request deduplication
-test/linearizability/    chaos tests and Porcupine checks
+internal/chaos/            simulated cluster + clients with fault injection
+test/linearizability/    Porcupine model and seeded chaos tests
 bench/                   benchmarks
 docs/design.md           design decisions, tradeoffs, bugs found
 ```
@@ -89,6 +90,15 @@ Stop the leader with Ctrl+C: the other two elect a new one and reads and writes 
 
 Connections are unauthenticated and unencrypted (no TLS), which is fine for a local demo and not for a network you do not trust.
 
+### Checking linearizability
+
+```
+go test ./test/linearizability -v                      # 200 seeded chaos runs
+$env:RAFTKV_CHAOS_SEEDS=5000; go test ./test/linearizability -timeout 1h   # soak (PowerShell)
+```
+
+If a seed ever fails, the test prints the exact command that replays it and writes an HTML visualization of the failing history. See [`docs/design.md`](docs/design.md) for what is checked and how the checker itself is validated.
+
 ### Regenerating the protobuf code
 
 Only needed after editing `api/raftkv.proto`. Install `protoc` (`winget install protobuf`) and the two plugins (`go install google.golang.org/protobuf/cmd/protoc-gen-go@latest` and `go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest`), then run `scripts/gen-proto.ps1` (or `.sh`). The generated code in `api/raftkvpb` is committed.
@@ -100,7 +110,7 @@ Only needed after editing `api/raftkv.proto`. Install `protoc` (`winget install 
 - [x] **Phase 2: replication.** AppendEntries with log matching, commit index, follower catch-up, Apply; state machine safety and log matching checked on every simulated event
 - [x] **Phase 3: durability.** Checksummed WAL with fsync, torn-write recovery, persisted term/vote/log; crash injection at every storage operation
 - [x] **Phase 4: real API.** gRPC and Protobuf, leader-finding client with exactly-once retries, CLI, Docker Compose cluster
-- [ ] **Phase 5: proof.** Operation histories, Porcupine checks, thousands of seeded chaos runs
+- [x] **Phase 5: proof.** Operation histories, Porcupine checks, seeded chaos runs (partitions, crashes, message loss), checker validated by breaking the system on purpose
 - [ ] **Phase 6: polish.** Snapshots and log compaction, benchmarks, design write-up
 
 ## Design principles
