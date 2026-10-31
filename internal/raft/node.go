@@ -16,7 +16,7 @@ const maxEntriesPerMessage = 64
 //
 //	Phase 1: leader election (RequestVote, terms, randomized timeouts)  <- done
 //	Phase 2: log replication (AppendEntries, commit index, Apply)       <- done
-//	Phase 3: durable storage behind the Storage interface (WAL)
+//	Phase 3: durable storage behind the Storage interface (WAL) -- done
 //
 // Log indexes are contiguous and start at 1, so the entry with index i is
 // log[i-1]. (Snapshots, which would change that, come later.)
@@ -85,6 +85,12 @@ func NewNode(cfg Config, storage Storage, transport Transport) (*Node, error) {
 	ps, err := storage.Load()
 	if err != nil {
 		return nil, fmt.Errorf("raft: load persistent state: %w", err)
+	}
+
+	for i, e := range ps.Log {
+		if e.Index != Index(i+1) {
+			return nil, fmt.Errorf("raft: stored log is not contiguous: position %d holds index %d", i+1, e.Index)
+		}
 	}
 
 	n := &Node{
@@ -195,7 +201,7 @@ func (n *Node) startElection() {
 	n.leaderID = NoLeader
 	n.votedFor = n.cfg.ID
 	n.votes = map[NodeID]bool{n.cfg.ID: true}
-	n.persist()
+	n.saveHardState()
 	n.resetElectionTimer()
 
 	// A single-node cluster wins immediately.
@@ -236,7 +242,7 @@ func (n *Node) handleRequestVote(from NodeID, args RequestVoteArgs) {
 	if grant {
 		if n.votedFor != args.CandidateID {
 			n.votedFor = args.CandidateID
-			n.persist()
+			n.saveHardState()
 		}
 		n.electionElapsed = 0 // granting a vote counts as hearing from a viable leader
 	}
@@ -293,7 +299,7 @@ func (n *Node) stepDown(term Term) {
 	if term > n.currentTerm {
 		n.currentTerm = term
 		n.votedFor = NoVote
-		n.persist()
+		n.saveHardState()
 	}
 	n.role = Follower
 	n.leaderID = NoLeader
@@ -452,21 +458,28 @@ func (n *Node) handleAppendEntries(from NodeID, args AppendEntriesArgs) {
 	// Rules 3 and 4: delete a conflicting suffix, then append what is new.
 	// An entry that already matches is left alone, so a duplicated or delayed
 	// message can never shorten a log that already holds newer entries.
-	changed := false
+	var toAppend []LogEntry
+	truncateAt := Index(0) // 0 means no truncation
 	for i, e := range args.Entries {
 		idx := args.PrevLogIndex + 1 + Index(i)
 		if idx <= Index(len(n.log)) {
 			if n.log[idx-1].Term == e.Term {
 				continue
 			}
-			n.log = n.log[:idx-1] // conflict: drop this entry and everything after it
+			truncateAt = idx // conflict: drop this entry and everything after it
 		}
-		n.log = append(n.log, args.Entries[i:]...)
-		changed = true
+		toAppend = args.Entries[i:]
 		break
 	}
-	if changed {
-		n.persist() // the log reaches stable storage before we acknowledge it
+	if truncateAt != 0 {
+		// Storage first, then memory: the log reaches stable storage before we
+		// acknowledge it.
+		n.must(n.storage.TruncateFrom(truncateAt), "truncate log")
+		n.log = n.log[:truncateAt-1]
+	}
+	if len(toAppend) > 0 {
+		n.must(n.storage.Append(toAppend), "append entries")
+		n.log = append(n.log, toAppend...)
 	}
 
 	// Rule 5: learn the commit index, but only up to the last entry this
@@ -505,8 +518,8 @@ func (n *Node) majority() int { return len(n.cfg.Peers)/2 + 1 }
 func (n *Node) appendLocal(command []byte) LogEntry {
 	last, _ := n.lastLog()
 	e := LogEntry{Term: n.currentTerm, Index: last + 1, Command: command}
+	n.must(n.storage.Append([]LogEntry{e}), "append entry")
 	n.log = append(n.log, e)
-	n.persist()
 	return e
 }
 
@@ -537,17 +550,17 @@ func (n *Node) send(to NodeID, payload any) {
 	n.transport.Send(Message{From: n.cfg.ID, To: to, Payload: payload})
 }
 
-// persist writes term, vote and log to stable storage. Raft cannot safely
-// continue if it fails to remember a vote, a term or a log entry, so a storage
-// failure is fatal.
-func (n *Node) persist() {
-	err := n.storage.Save(PersistentState{
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
-		Log:         n.log,
-	})
+// saveHardState makes the current term and vote durable.
+func (n *Node) saveHardState() {
+	n.must(n.storage.SaveHardState(n.currentTerm, n.votedFor), "save term and vote")
+}
+
+// must treats a storage failure as fatal. Raft cannot safely continue if it
+// fails to remember a vote, a term or a log entry: carrying on could let it
+// acknowledge something it will forget after a restart.
+func (n *Node) must(err error, what string) {
 	if err != nil {
-		panic(fmt.Sprintf("raft: node %d cannot persist state: %v", n.cfg.ID, err))
+		panic(fmt.Sprintf("raft: node %d cannot %s: %v", n.cfg.ID, what, err))
 	}
 }
 

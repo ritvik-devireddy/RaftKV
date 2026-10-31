@@ -4,7 +4,7 @@
 
 A linearizable key-value store built on a from-scratch Raft implementation in Go, with a deterministic chaos-testing harness.
 
-> **Status: work in progress.** Leader election and log replication work and are tested across hundreds of seeded failure scenarios (message loss, partitions, stale leaders). Durable storage and the network API are next (see the [roadmap](#roadmap)).
+> **Status: work in progress.** Leader election, log replication, and crash-safe durable storage work and are tested across hundreds of seeded failure scenarios (message loss, partitions, stale leaders, nodes crashing at arbitrary points). The network API is next (see the [roadmap](#roadmap)).
 
 ## What it is
 
@@ -44,7 +44,7 @@ cmd/raftkv-server/       node binary
 cmd/raftkv-cli/          command-line client
 internal/raft/           consensus core (transport- and storage-agnostic)
 internal/simnet/         deterministic simulated network
-internal/storage/        write-ahead log and snapshots
+internal/storage/        write-ahead log (snapshots planned)
 internal/kv/             key-value state machine with request deduplication
 test/linearizability/    chaos tests and Porcupine checks
 bench/                   benchmarks
@@ -68,7 +68,7 @@ go test -race ./...
 - [x] **Phase 0: setup.** Repo layout, CI, simulated network, KV state machine with dedup
 - [x] **Phase 1: elections.** Terms, votes, randomized timeouts, heartbeats; at most one leader per term under message loss and partitions
 - [x] **Phase 2: replication.** AppendEntries with log matching, commit index, follower catch-up, Apply; state machine safety and log matching checked on every simulated event
-- [ ] **Phase 3: durability.** Checksummed WAL, crash recovery, persisted term/vote/log
+- [x] **Phase 3: durability.** Checksummed WAL with fsync, torn-write recovery, persisted term/vote/log; crash injection at every storage operation
 - [ ] **Phase 4: real API.** gRPC and Protobuf, CLI client, Docker Compose cluster
 - [ ] **Phase 5: proof.** Operation histories, Porcupine checks, thousands of seeded chaos runs
 - [ ] **Phase 6: polish.** Snapshots and log compaction, benchmarks, design write-up

@@ -54,8 +54,8 @@ func (c *cluster) onApply(id int, e LogEntry) {
 // and including that entry.
 func (c *cluster) checkLogMatching() {
 	logs := make([][]LogEntry, len(c.nodes))
-	for i, n := range c.nodes {
-		logs[i] = n.logCopy()
+	for i := range c.nodes {
+		logs[i] = c.logOf(i)
 		for j, e := range logs[i] {
 			if e.Index != Index(j+1) {
 				c.t.Fatalf("seed %d: node %d has entry %+v at position %d", c.seed, i, e, j+1)
@@ -83,11 +83,19 @@ func (c *cluster) checkLogMatching() {
 
 // proposeTo offers one command to a specific node and records it if accepted.
 func (c *cluster) proposeTo(id int, cmd string) bool {
-	if _, _, ok := c.nodes[id].Propose([]byte(cmd)); !ok {
+	if c.down[id] > 0 {
 		return false
 	}
+	// Record the command before offering it: if the node crashes after making
+	// the entry durable, the entry may still commit later, and that is not a
+	// phantom.
 	c.proposed[cmd] = true
-	return true
+	ok := false
+	crashed := c.guard(id, func() { _, _, ok = c.nodes[id].Propose([]byte(cmd)) })
+	if !ok && !crashed {
+		delete(c.proposed, cmd)
+	}
+	return ok
 }
 
 // propose gives a fresh command to every node that currently believes it is
@@ -95,9 +103,14 @@ func (c *cluster) proposeTo(id int, cmd string) bool {
 func (c *cluster) propose() int {
 	accepted := 0
 	for id := range c.nodes {
-		if c.proposeTo(id, fmt.Sprintf("cmd-%d", c.nextCmd)) {
-			c.nextCmd++
+		name := fmt.Sprintf("cmd-%d", c.nextCmd)
+		if c.proposeTo(id, name) {
 			accepted++
+		}
+		// A node that crashed mid-Propose may have made the entry durable, so
+		// the name is used up even though the proposal was not acknowledged.
+		if c.proposed[name] {
+			c.nextCmd++
 		}
 	}
 	return accepted
@@ -111,6 +124,7 @@ func (c *cluster) requireConverged() {
 	if len(c.global) == 0 {
 		c.t.Fatalf("seed %d: nothing was ever committed", c.seed)
 	}
+	c.requireAllUp()
 	ref := c.nodes[0].logCopy()
 	for id, n := range c.nodes {
 		if got := len(c.applied[id]); got != len(c.global) {

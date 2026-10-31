@@ -34,6 +34,16 @@ type cluster struct {
 	// never show up as committed.
 	proposed map[string]bool
 	nextCmd  int
+
+	// Crash and restart support (see crash_test.go).
+	peers     []NodeID
+	storages  []*crashStorage // each node's "disk": survives crashes
+	down      []int           // ticks until a crashed node restarts; 0 = up
+	gen       []int           // restarts so far, so each life gets its own seed
+	rng       *rand.Rand      // drives crash decisions only
+	crashRate float64         // per node per tick chance of a crash; 0 disables
+
+	durableChecks int
 }
 
 func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *cluster {
@@ -47,40 +57,58 @@ func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *clust
 		applied:  make([][]LogEntry, size),
 		global:   make(map[Index]LogEntry),
 		proposed: make(map[string]bool),
+		storages: make([]*crashStorage, size),
+		down:     make([]int, size),
+		gen:      make([]int, size),
+		rng:      rand.New(rand.NewSource(seed*31 + 7)),
 	}
 
 	peers := make([]NodeID, size)
 	for i := range peers {
 		peers[i] = NodeID(i)
 	}
+	c.peers = peers
 	for i := 0; i < size; i++ {
 		id := i
-		n, err := NewNode(Config{
-			ID:              NodeID(i),
-			Peers:           peers,
-			ElectionTickMin: 10,
-			ElectionTickMax: 20,
-			HeartbeatTick:   2,
-			Seed:            seed,
-			Apply:           func(e LogEntry) { c.onApply(id, e) },
-		}, NewMemoryStorage(), simTransport{c.net})
+		c.storages[id] = newCrashStorage()
+		n, err := NewNode(c.nodeConfig(id), c.storages[id], simTransport{c.net})
 		if err != nil {
 			t.Fatal(err)
 		}
 		c.nodes = append(c.nodes, n)
 
 		c.net.Register(id, func(_, _ int, msg any) {
-			c.nodes[id].Step(msg.(Message))
+			if c.down[id] > 0 {
+				return // a crashed node hears nothing
+			}
+			c.guard(id, func() { c.nodes[id].Step(msg.(Message)) })
 			c.observe()
 		})
 	}
 	return c
 }
 
+// nodeConfig is the configuration for a node's current life. Each restart gets
+// a new seed, so a restarted node does not replay its previous timeouts.
+func (c *cluster) nodeConfig(id int) Config {
+	return Config{
+		ID:              NodeID(id),
+		Peers:           c.peers,
+		ElectionTickMin: 10,
+		ElectionTickMax: 20,
+		HeartbeatTick:   2,
+		Seed:            c.seed + int64(c.gen[id])*7919,
+		Apply:           func(e LogEntry) { c.onApply(id, e) },
+	}
+}
+
 // observe checks Election Safety (Raft paper, Figure 3): at most one leader
 // can be elected in any given term. It runs after every event.
 func (c *cluster) observe() {
-	for _, n := range c.nodes {
+	for id, n := range c.nodes {
+		if c.down[id] > 0 {
+			continue
+		}
 		st := n.Status()
 		if st.Role != Leader {
 			continue
@@ -99,13 +127,23 @@ func (c *cluster) observe() {
 // run advances the cluster by the given number of ticks.
 func (c *cluster) run(ticks int) {
 	for i := 0; i < ticks; i++ {
-		for _, n := range c.nodes {
-			n.Tick()
+		for id := range c.nodes {
+			if c.down[id] > 0 {
+				if c.down[id]--; c.down[id] == 0 {
+					c.restart(id)
+				}
+				continue
+			}
+			c.maybeCrash(id)
+			if c.down[id] == 0 {
+				c.guard(id, c.nodes[id].Tick)
+			}
 			c.observe()
 		}
 		c.net.RunUntil(c.net.Now() + tickDuration)
 		c.observe()
 		c.checkLogMatching()
+		c.checkDurable()
 	}
 }
 
