@@ -1,14 +1,8 @@
-// Package linearizability will hold the chaos tests that prove the cluster
-// behaves like a single correct key-value store.
+// Package linearizability checks recorded client histories against a model of
+// the key-value store using Porcupine, and runs thousands of seeded chaos
+// simulations (partitions, crashes, message loss) through that check.
 //
-// Planned for phase 5:
-//   - run clients against a simnet cluster while injecting partitions, crashes,
-//     restarts, drops and reordering, all driven by a seed;
-//   - record every operation (invoke time, return time, input, output);
-//   - check the history with Porcupine (github.com/anishathalye/porcupine);
-//   - turn every failing seed into a named regression test.
-//
-// Add the Porcupine dependency when you reach that phase:
-//
-//	go get github.com/anishathalye/porcupine
+// A failing seed is a reproducible bug report; see chaos_test.go for the
+// replay command and for the tests that break the system on purpose to prove
+// the checker can fail.
 package linearizability

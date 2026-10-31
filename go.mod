@@ -3,6 +3,7 @@ module github.com/ritvik-devireddy/raftkv
 go 1.26.0
 
 require (
+	github.com/anishathalye/porcupine v1.3.1
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
 )
