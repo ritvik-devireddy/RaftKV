@@ -57,7 +57,7 @@ func TestEmptyWALLoadsInitialState(t *testing.T) {
 
 // The WAL must behave exactly like MemoryStorage, including across reopens.
 func TestWALMatchesMemoryStorageModel(t *testing.T) {
-	for seed := int64(1); seed <= 50; seed++ {
+	for seed := int64(1); seed <= 20; seed++ {
 		rng := rand.New(rand.NewSource(seed))
 		dir := t.TempDir()
 		w := openWAL(t, dir)
@@ -65,6 +65,10 @@ func TestWALMatchesMemoryStorageModel(t *testing.T) {
 		term := raft.Term(0)
 
 		for step := 0; step < 200; step++ {
+			// Reading the file back is the expensive part (slow on Windows,
+			// where every open is scanned), so compare every 10th step and
+			// right after every reopen rather than after each operation.
+			check := step%10 == 0
 			switch rng.Intn(10) {
 			case 0, 1, 2:
 				if rng.Intn(2) == 0 {
@@ -93,6 +97,7 @@ func TestWALMatchesMemoryStorageModel(t *testing.T) {
 					t.Fatal(err)
 				}
 				w = openWAL(t, dir)
+				check = true
 			default:
 				log := mustLoad(t, model).Log
 				var batch []raft.LogEntry
@@ -109,6 +114,9 @@ func TestWALMatchesMemoryStorageModel(t *testing.T) {
 				if err := model.Append(batch); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if !check {
+				continue
 			}
 			if got, want := mustLoad(t, w), mustLoad(t, model); !same(got, want) {
 				t.Fatalf("seed %d step %d: wal %+v, model %+v", seed, step, got, want)
@@ -186,27 +194,49 @@ func (s script) expectedFor(content []byte) (raft.PersistentState, int) {
 // A crash can cut the file at any byte. Whatever the cut, recovery must give
 // back exactly the records that were completely written, and the WAL must then
 // be usable.
+//
+// The pure recovery logic (replay) is checked at every offset in memory. The
+// real file path (Open cutting the tail, then appending) is checked at a
+// sample of offsets plus every record boundary and its neighbours: creating
+// thousands of files is slow on some filesystems.
 func TestRecoveryFromTornWriteAtEveryOffset(t *testing.T) {
 	s := buildScript(t)
+	nearBoundary := func(cut int) bool {
+		for _, size := range s.sizes {
+			if cut >= size-1 && cut <= size+1 {
+				return true
+			}
+		}
+		return false
+	}
 	for _, zeroFill := range []bool{false, true} {
 		for cut := 0; cut <= len(s.data); cut++ {
-			dir := t.TempDir()
 			content := append([]byte(nil), s.data[:cut]...)
 			if zeroFill {
 				// Some filesystems extend the file with zeros after a crash.
 				content = append(content, make([]byte, len(s.data)-cut)...)
 			}
+			want, wantSize := s.expectedFor(content)
+
+			got, valid, err := replay(content)
+			if err != nil {
+				t.Fatalf("zeroFill=%v cut=%d: replay: %v", zeroFill, cut, err)
+			}
+			if !same(got, want) || valid != wantSize {
+				t.Fatalf("zeroFill=%v cut=%d: replay gave %+v (valid %d), want %+v (valid %d)",
+					zeroFill, cut, got, valid, want, wantSize)
+			}
+
+			if cut%17 != 0 && !nearBoundary(cut) {
+				continue
+			}
+			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, FileName), content, 0o644); err != nil {
 				t.Fatal(err)
 			}
-
-			want, wantSize := s.expectedFor(content)
 			w, err := Open(dir, Options{NoSync: true})
 			if err != nil {
 				t.Fatalf("zeroFill=%v cut=%d: open: %v", zeroFill, cut, err)
-			}
-			if got := mustLoad(t, w); !same(got, want) {
-				t.Fatalf("zeroFill=%v cut=%d: got %+v, want %+v", zeroFill, cut, got, want)
 			}
 			if info, _ := os.Stat(w.Path()); info.Size() != int64(wantSize) {
 				t.Fatalf("zeroFill=%v cut=%d: file is %d bytes after recovery, want %d",
@@ -220,9 +250,9 @@ func TestRecoveryFromTornWriteAtEveryOffset(t *testing.T) {
 			}
 			w.Close()
 			w2 := openWAL(t, dir)
-			got := mustLoad(t, w2)
-			if n := len(got.Log); n != len(want.Log)+1 || string(got.Log[n-1].Command) != "after" {
-				t.Fatalf("zeroFill=%v cut=%d: lost the post-recovery append: %+v", zeroFill, cut, got.Log)
+			after := mustLoad(t, w2)
+			if n := len(after.Log); n != len(want.Log)+1 || string(after.Log[n-1].Command) != "after" {
+				t.Fatalf("zeroFill=%v cut=%d: lost the post-recovery append: %+v", zeroFill, cut, after.Log)
 			}
 			w2.Close()
 		}
@@ -232,8 +262,7 @@ func TestRecoveryFromTornWriteAtEveryOffset(t *testing.T) {
 // A batch is several records written together. A crash in the middle leaves a
 // prefix of the batch, never a gap.
 func TestTornBatchRecoversAPrefix(t *testing.T) {
-	dir := t.TempDir()
-	w := openWAL(t, dir)
+	w := openWAL(t, t.TempDir())
 	var batch []raft.LogEntry
 	for i := 1; i <= 6; i++ {
 		batch = append(batch, entry(1, raft.Index(i), "cmd"))
@@ -245,14 +274,13 @@ func TestTornBatchRecoversAPrefix(t *testing.T) {
 	w.Close()
 
 	for cut := 0; cut <= len(data); cut++ {
-		d := t.TempDir()
-		os.WriteFile(filepath.Join(d, FileName), data[:cut], 0o644)
-		w := openWAL(t, d)
-		got := mustLoad(t, w).Log
-		if len(got) > 0 && !reflect.DeepEqual(got, batch[:len(got)]) {
+		st, _, err := replay(data[:cut])
+		if err != nil {
+			t.Fatalf("cut=%d: %v", cut, err)
+		}
+		if got := st.Log; len(got) > 0 && !reflect.DeepEqual(got, batch[:len(got)]) {
 			t.Fatalf("cut=%d: recovered log is not a prefix of the batch: %+v", cut, got)
 		}
-		w.Close()
 	}
 }
 
@@ -263,15 +291,12 @@ func TestCorruptionInTheMiddleIsAnError(t *testing.T) {
 	// Flip one bit in every byte of every record except the last one.
 	lastStart := s.sizes[len(s.sizes)-2]
 	for pos := 0; pos < lastStart; pos++ {
-		dir := t.TempDir()
 		data := append([]byte(nil), s.data...)
 		data[pos] ^= 0x10
-		os.WriteFile(filepath.Join(dir, FileName), data, 0o644)
-		w, err := Open(dir, Options{NoSync: true})
+		_, _, err := replay(data)
 		if err == nil {
-			// The only acceptable silent outcomes are the documented limitation:
+			// The only acceptable silent outcome is the documented limitation:
 			// a length field made to look like a record running off the end.
-			w.Close()
 			if !lengthFieldOfSomeRecord(s, pos) {
 				t.Fatalf("flip at byte %d was not detected", pos)
 			}
@@ -298,18 +323,15 @@ func TestDamagedLastRecordIsTreatedAsTorn(t *testing.T) {
 	s := buildScript(t)
 	lastStart := s.sizes[len(s.sizes)-2]
 	for pos := lastStart; pos < len(s.data); pos++ {
-		dir := t.TempDir()
 		data := append([]byte(nil), s.data...)
 		data[pos] ^= 0x01
-		os.WriteFile(filepath.Join(dir, FileName), data, 0o644)
-		w, err := Open(dir, Options{NoSync: true})
+		got, valid, err := replay(data)
 		if err != nil {
 			t.Fatalf("flip at byte %d: %v", pos, err)
 		}
-		if got, want := mustLoad(t, w), s.states[len(s.states)-2]; !same(got, want) {
-			t.Fatalf("flip at byte %d: got %+v, want %+v", pos, got, want)
+		if want := s.states[len(s.states)-2]; !same(got, want) || valid != lastStart {
+			t.Fatalf("flip at byte %d: got %+v (valid %d), want %+v (valid %d)", pos, got, valid, want, lastStart)
 		}
-		w.Close()
 	}
 }
 

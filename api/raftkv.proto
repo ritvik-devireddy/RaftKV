@@ -13,11 +13,14 @@ service KV {
   rpc CompareAndSwap(CASRequest) returns (CASResponse);
 }
 
-// Raft is the node-to-node API. Field names follow Figure 2 of the Raft paper.
+// Raft is the node-to-node API. The Raft core is message-passing: a vote
+// request and its reply are two independent messages, not a call and its
+// return value, and either may be lost or arrive late. So the wire protocol is
+// one fire-and-forget RPC that carries any of the four message kinds, and the
+// receiver feeds it straight into the node.
 service Raft {
-  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
-  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
-  // TODO(snapshots): rpc InstallSnapshot(...)
+  rpc Step(RaftMessage) returns (StepAck);
+  // TODO(snapshots): InstallSnapshot payload
 }
 
 // ---- client API ----
@@ -73,13 +76,27 @@ message CASResponse {
   string current = 3; // value after the operation
 }
 
-// ---- Raft RPCs ----
-
 message LogEntry {
   uint64 term = 1;
   uint64 index = 2;
   bytes command = 3;
 }
+
+// ---- Raft messages (field names follow Figure 2 of the Raft paper) ----
+
+message RaftMessage {
+  int32 from = 1;
+  int32 to = 2;
+  oneof payload {
+    RequestVoteRequest request_vote = 3;
+    RequestVoteResponse request_vote_reply = 4;
+    AppendEntriesRequest append_entries = 5;
+    AppendEntriesResponse append_entries_reply = 6;
+  }
+}
+
+// Receipt only. Raft replies travel as their own RaftMessage.
+message StepAck {}
 
 message RequestVoteRequest {
   uint64 term = 1;
@@ -103,4 +120,6 @@ message AppendEntriesRequest {
 message AppendEntriesResponse {
   uint64 term = 1;
   bool success = 2;
+  uint64 match_index = 3;    // last entry the follower verified matches the leader
+  uint64 last_log_index = 4; // follower's log length, so the leader can skip back fast
 }

@@ -1,0 +1,33 @@
+# A three-node RaftKV cluster.
+#
+#   docker compose up --build
+#   go run ./cmd/raftkv-cli put hello world      (uses the default localhost:7001-7003)
+#
+# Nodes find each other by service name inside the compose network. Clients on
+# your machine use the published ports, so -client-addrs tells each node which
+# address to put in a "try the leader over there" redirect.
+x-node: &node
+  build: .
+  restart: unless-stopped
+
+services:
+  node0:
+    <<: *node
+    command: ["-id=0", "-listen=:7000", "-data=/data", "-peers=node0:7000,node1:7000,node2:7000", "-client-addrs=localhost:7001,localhost:7002,localhost:7003"]
+    ports: ["7001:7000"]
+    volumes: ["node0-data:/data"]
+  node1:
+    <<: *node
+    command: ["-id=1", "-listen=:7000", "-data=/data", "-peers=node0:7000,node1:7000,node2:7000", "-client-addrs=localhost:7001,localhost:7002,localhost:7003"]
+    ports: ["7002:7000"]
+    volumes: ["node1-data:/data"]
+  node2:
+    <<: *node
+    command: ["-id=2", "-listen=:7000", "-data=/data", "-peers=node0:7000,node1:7000,node2:7000", "-client-addrs=localhost:7001,localhost:7002,localhost:7003"]
+    ports: ["7003:7000"]
+    volumes: ["node2-data:/data"]
+
+volumes:
+  node0-data:
+  node1-data:
+  node2-data:

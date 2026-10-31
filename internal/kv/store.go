@@ -106,3 +106,13 @@ func (s *Store) execute(cmd Command) Result {
 		return Result{}
 	}
 }
+
+// Snapshot returns a copy of the current data. It is for tests and, later,
+// snapshotting; like every other Store method it must not race with Apply.
+func (s *Store) Snapshot() map[string]string {
+	out := make(map[string]string, len(s.data))
+	for k, v := range s.data {
+		out[k] = v
+	}
+	return out
+}
