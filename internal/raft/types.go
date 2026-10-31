@@ -56,6 +56,12 @@ type LogEntry struct {
 	Command []byte
 }
 
+// IsNoOp reports whether the entry carries no client command. A new leader
+// appends one no-op entry at the start of its term: committing it commits
+// every earlier entry too, which a leader may not do by counting replicas
+// alone (Raft paper, section 5.4.2). State machines must ignore no-ops.
+func (e LogEntry) IsNoOp() bool { return len(e.Command) == 0 }
+
 // Config configures a Node. Timeouts are measured in ticks, not wall-clock
 // time, so tests control time completely.
 type Config struct {
@@ -68,7 +74,9 @@ type Config struct {
 
 	Seed int64 // seeds the election-timeout randomness
 
-	// Apply is called, in log order, once for every committed entry.
+	// Apply is called, in log order, exactly once for every committed entry,
+	// including no-op entries (see LogEntry.IsNoOp). It runs with the node's
+	// lock held, so it must be quick and must not call back into the node.
 	Apply func(LogEntry)
 }
 
@@ -95,9 +103,20 @@ type AppendEntriesArgs struct {
 	LeaderCommit Index
 }
 
+// AppendEntriesReply carries two fields beyond Figure 2:
+//
+//   - MatchIndex (on success) is the highest index the follower now knows it
+//     shares with the leader. The leader uses it instead of guessing from the
+//     request it sent, so duplicated or reordered replies cannot corrupt its
+//     bookkeeping.
+//   - LastLogIndex (always) is the follower's last log index. On a failure the
+//     leader uses it to skip back past a follower whose log is much shorter,
+//     instead of retrying one index at a time.
 type AppendEntriesReply struct {
-	Term    Term
-	Success bool
+	Term         Term
+	Success      bool
+	MatchIndex   Index
+	LastLogIndex Index
 }
 
 // Message is the envelope the Transport carries. Payload is one of the four

@@ -25,16 +25,28 @@ type cluster struct {
 
 	// leaders records every node that has ever been leader, per term.
 	leaders map[Term]map[NodeID]bool
+
+	// What each node's state machine has been given, in order.
+	applied [][]LogEntry
+	// Every entry any node has applied, by index (for State Machine Safety).
+	global map[Index]LogEntry
+	// Every command a leader has accepted, so a command nobody proposed can
+	// never show up as committed.
+	proposed map[string]bool
+	nextCmd  int
 }
 
 func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *cluster {
 	t.Helper()
 	netCfg.Seed = seed
 	c := &cluster{
-		t:       t,
-		seed:    seed,
-		net:     simnet.New(netCfg),
-		leaders: make(map[Term]map[NodeID]bool),
+		t:        t,
+		seed:     seed,
+		net:      simnet.New(netCfg),
+		leaders:  make(map[Term]map[NodeID]bool),
+		applied:  make([][]LogEntry, size),
+		global:   make(map[Index]LogEntry),
+		proposed: make(map[string]bool),
 	}
 
 	peers := make([]NodeID, size)
@@ -42,6 +54,7 @@ func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *clust
 		peers[i] = NodeID(i)
 	}
 	for i := 0; i < size; i++ {
+		id := i
 		n, err := NewNode(Config{
 			ID:              NodeID(i),
 			Peers:           peers,
@@ -49,13 +62,13 @@ func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *clust
 			ElectionTickMax: 20,
 			HeartbeatTick:   2,
 			Seed:            seed,
+			Apply:           func(e LogEntry) { c.onApply(id, e) },
 		}, NewMemoryStorage(), simTransport{c.net})
 		if err != nil {
 			t.Fatal(err)
 		}
 		c.nodes = append(c.nodes, n)
 
-		id := i
 		c.net.Register(id, func(_, _ int, msg any) {
 			c.nodes[id].Step(msg.(Message))
 			c.observe()
@@ -92,6 +105,7 @@ func (c *cluster) run(ticks int) {
 		}
 		c.net.RunUntil(c.net.Now() + tickDuration)
 		c.observe()
+		c.checkLogMatching()
 	}
 }
 

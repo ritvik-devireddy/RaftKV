@@ -91,6 +91,10 @@ func (n *Network) Register(id int, h Handler) { n.handlers[id] = h }
 // Now returns the current virtual time.
 func (n *Network) Now() time.Duration { return n.now }
 
+// SetDropRate changes the probability that a message is lost. A test can run a
+// cluster under heavy loss and then set it to zero to let the cluster settle.
+func (n *Network) SetDropRate(p float64) { n.cfg.DropRate = p }
+
 // Stats returns message counters.
 func (n *Network) Stats() Stats { return n.stats }
 

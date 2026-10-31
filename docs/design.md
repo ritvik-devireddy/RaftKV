@@ -18,12 +18,23 @@ TODO: diagram and a one-paragraph description of each layer.
 
 ## Raft implementation notes
 
-TODO: one short section per mechanism, each pointing at the code and the Figure 2 rule it implements.
+Code is in `internal/raft`. Done so far, with the decisions worth being able to explain:
 
-- Leader election and randomized timeouts
-- Log replication and the commit rule (only commit entries from the current term by counting replicas)
-- Persistence: what is saved and when (term, vote, and log before replying to any RPC)
-- Log compaction and snapshots
+**Leader election** (`node.go`: `startElection`, `handleRequestVote`)
+- Time is logical: the driver calls `Tick`, and timeouts are counted in ticks. That is what makes a whole cluster replayable from a seed.
+- The vote and the term are persisted before the reply leaves the node, so a restart cannot cause a double vote in one term. `TestVoteSurvivesRestart` pins this.
+
+**Log replication** (`node.go`: `sendAppendEntries`, `handleAppendEntries`, `advanceCommit`)
+- *Followers never truncate a matching entry.* Only a conflicting entry (same index, different term) triggers deleting the suffix. A delayed or duplicated AppendEntries carrying old entries must not shorten a log that has moved on.
+- *The follower's commit index is capped at the last entry the message verified* (`min(leaderCommit, prevLogIndex + len(entries))`). Entries after that point may still differ from the leader's log.
+- *A leader commits by counting replicas only for entries from its own term* (Figure 8). Earlier-term entries commit indirectly, when a current-term entry above them does. `TestLeaderCommitsOnlyCurrentTermEntriesByCounting` reproduces the case.
+- *A new leader appends a no-op entry.* Without one, a leader with no client traffic could not commit entries inherited from earlier terms. State machines ignore no-ops (`LogEntry.IsNoOp`).
+- *Two fields beyond Figure 2 in `AppendEntriesReply`.* `MatchIndex` lets the leader record exactly what a follower holds, so duplicated or reordered replies cannot corrupt `matchIndex` (it only moves forward). `LastLogIndex` lets the leader skip back past a short follower log in one step instead of one index at a time.
+- Catch-up is bounded to 64 entries per message and pipelined: each success reply triggers the next batch immediately.
+
+**Still to do**
+- Persistence: durable WAL behind `Storage` (phase 3). The log is already persisted through the interface before any acknowledgement.
+- Log compaction and snapshots (phase 6).
 
 ## Client semantics
 
