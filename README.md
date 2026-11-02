@@ -111,7 +111,8 @@ Only needed after editing `api/raftkv.proto`. Install `protoc` (`winget install 
 - [x] **Phase 3: durability.** Checksummed WAL with fsync, torn-write recovery, persisted term/vote/log; crash injection at every storage operation
 - [x] **Phase 4: real API.** gRPC and Protobuf, leader-finding client with exactly-once retries, CLI, Docker Compose cluster
 - [x] **Phase 5: proof.** Operation histories, Porcupine checks, seeded chaos runs (partitions, crashes, message loss), checker validated by breaking the system on purpose
-- [ ] **Phase 6: polish.** Snapshots and log compaction, benchmarks, design write-up
+- [x] **PreVote.** A node cut off from the cluster no longer inflates its term and deposes a healthy leader when it returns; reproduced by a failing test first, then fixed and mutation-tested
+- [ ] **Phase 6: polish.** Snapshots and log compaction, benchmarks, architecture diagram, design write-up
 
 ## Design principles
 

@@ -14,7 +14,7 @@ Everything here was verified in the conversation unless it is marked **[unverifi
 - **Purpose:** a GitHub-first portfolio project for Summer 2027 SWE internship applications. He may later put it on his resume.
 - **The selling point is not "implements Raft"** but "demonstrably correct under failure". The Raft core is independent of the network and disk, so whole clusters run single-threaded on a seeded simulated network, every failure replays from its seed, and recorded client histories are checked for linearizability with Porcupine.
 - **Repo:** `github.com/ritvik-devireddy/RaftKV` (local: `C:\SWEProjects\RaftKV`). Go module path (lowercase): `github.com/ritvik-devireddy/raftkv`.
-- **Stage:** Phases 0 to 5 are done and pushed (latest commit `3d497bf` on `main`). Phase 6 (PreVote, snapshots and log compaction, benchmarks, diagram, polish) has not started.
+- **Stage:** Phases 0 to 5 are done and pushed (latest commit `3d497bf` on `main`). PreVote was implemented on 2026-11-01 (section 11 item 1; uncommitted until Ritvik confirms the tests on his machine). The rest of Phase 6 (snapshots and log compaction, benchmarks, diagram, polish) has not started.
 
 ## 2. Project Goals and Requirements
 
@@ -221,7 +221,7 @@ Lease reads / ReadIndex (deferred), membership changes (non-goal), TLS (non-goal
 - Test helpers (package `raft`): `cluster`, `newCluster(t, size, seed, simnet.Config)`, `baseNet` (1 to 5ms delays), `c.run(ticks)`, `c.statuses()`, `c.requireStable() Status`, `c.nodeConfig(id)`, `c.observe()`, `crashStorage` (`armIn`, `armAt`, `disarm`, `summary`), `c.guard`, `c.crash`, `c.restart`, `c.maybeCrash`, `c.logOf`, `c.checkDurable`, `c.requireAllUp`, `c.proposeTo`, `c.propose`, `c.onApply`, `c.checkLogMatching`, `c.requireConverged`. Fields: `crashRate`, `down[]` (ticks until restart), `storages[]`, `nodes[]`, `net`, `leaders`, `applied`, `global`.
 
 ### Known issues and limitations
-- **No PreVote** (Raft thesis section 9.6). Mechanism: `handleRequestVote` calls `stepDown` on any higher-term request, so a node that was isolated (or restarted) and climbed its term disrupts a stable leader when it reconnects. Observed live (terms 6 and 7 after restarting node 0). Documented in `docs/design.md`.
+- **PreVote: implemented 2026-11-01** (types `PreVoteArgs`/`PreVoteReply`, `Node.startPreVote/handlePreVote/handlePreVoteReply`, field `preVotes`; wire messages `PreVoteRequest`/`PreVoteResponse` as `oneof` fields 7 and 8). Tests in `internal/raft/prevote_test.go`. Design in `docs/design.md`.
 - No snapshots or log compaction: the log grows without bound, restart replays the whole log, and the `kv` sessions map grows without bound (`TODO(snapshots)` in `store.go`).
 - Reads go through the log (slow).
 - Static membership. Insecure gRPC.
@@ -277,7 +277,7 @@ ReadIndex or lease reads, TLS, session expiry, verifying `docker compose up --bu
 - Phase 5 is complete, pushed (`3d497bf`), and passes with real Porcupine locally.
 - Ritvik was told to (a) press Enter on `git status --short` (it should print nothing), (b) run the 2000-seed soak and report the output, (c) check Actions on `3d497bf`. He has not reported (a) to (c) yet.
 - He then asked about moving to a Project chat and requested this handoff. I recommended staying in the original chat; the decision is his.
-- No PreVote code has been written yet.
+- PreVote is written and passes in Claude's container (raft, server, chaos packages; 2000-seed chaos run with a stand-in checker). Pending on Ritvik's machine: regenerate protobuf (`scripts\gen-proto.ps1`), then `go test -race -count=1 ./...`, then commit.
 
 ## 13. Immediate Next Implementation Steps
 

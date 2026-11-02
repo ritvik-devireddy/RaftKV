@@ -35,7 +35,7 @@ The project's selling point is not "implements Raft" but "demonstrably correct u
 
 ### Phase 4 status
 Complete. Verified: all tests pass with `-race` on Windows; a 3-node cluster ran locally via `go run`, `put`/`get` worked, killing the leader left reads and writes working, and the restarted node logged `term=5 log_len=3` (recovered from its WAL) and rejoined as a follower. Not verified: `docker compose up --build` (Docker not confirmed installed). `go mod tidy` raised go.mod to `go 1.26.0` (grpc v1.85 requires it); the Dockerfile uses `golang:1.26` and CI follows go.mod.
-Observed in the demo: a restarted node campaigned through terms 6 and 7 and forced an extra election. This is the known no-PreVote disruption (Raft thesis section 9.6); documented in `docs/design.md`, candidate Phase 6 item.
+Observed in the demo: a restarted node campaigned through terms 6 and 7 and forced an extra election. This was the no-PreVote disruption (Raft thesis section 9.6), fixed on 2026-11-01 (see `docs/design.md`); originally documented in `docs/design.md`, candidate Phase 6 item.
 
 ## 4. Architecture
 

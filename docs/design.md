@@ -32,6 +32,15 @@ Code is in `internal/raft`. Done so far, with the decisions worth being able to 
 - *Two fields beyond Figure 2 in `AppendEntriesReply`.* `MatchIndex` lets the leader record exactly what a follower holds, so duplicated or reordered replies cannot corrupt `matchIndex` (it only moves forward). `LastLogIndex` lets the leader skip back past a short follower log in one step instead of one index at a time.
 - Catch-up is bounded to 64 entries per message and pipelined: each success reply triggers the next batch immediately.
 
+**PreVote** (`node.go`: `startPreVote`, `handlePreVote`, `handlePreVoteReply`; Raft thesis section 9.6)
+- *The problem.* Without it, a node cut off from the cluster times out over and over, and every timeout raises its term. When the network heals, that inflated term deposes a healthy leader even though no election was needed. `TestRejoiningNodeDoesNotDisruptStableLeader` reproduces it: before the fix, a follower isolated for 300 ticks came back and turned "leader 2, term 1" into "leader 0, term 21".
+- *The fix.* When the election timer fires, a node first asks the others "would you vote for me?" (`PreVoteArgs`, carrying the term it would use) without changing its own term or vote. Only a majority of yes answers starts a real election. An isolated node gets no answers, so its term never moves.
+- *When a node says yes.* The candidate's would-be term is ahead of ours, its log is at least as up to date as ours, and we have not heard from a leader for at least the minimum election timeout. A node that is following a live leader (or is the leader) says no; that is the whole point.
+- *Answering a pre-vote changes nothing:* no term change, no vote used, no timer reset, no disk write (`TestPreVoteChangesNothing`, `TestIsolatedNodeNeverRaisesItsTerm`). If it did, PreVote would itself become a way to disrupt the cluster or to vote twice.
+- *Replies carry the round they answer* (`PreVoteTerm`), so a late reply to an old round cannot start an election (`TestStalePreVoteRepliesAreIgnored`).
+- *Liveness is preserved:* when a leader really is unreachable, the nodes that lost it stop hearing from it, agree to a pre-vote, and elect a replacement (`TestPreVoteStillReplacesAnUnreachableLeader`). The cost is one extra message round before each election.
+- *Mutation-tested.* Eleven injected bugs (ignore the leader check, ignore log recency, bump the term while pre-voting, consume the real vote, skip the round check, and others) are each caught by a test. The twelfth mutant (a leader granting pre-votes) is equivalent: a leader's election timer never advances, so the "heard from a leader recently" rule already refuses it. The explicit leader clause is kept for clarity.
+
 **Still to do**
 - Log compaction and snapshots (phase 6).
 
@@ -57,7 +66,7 @@ Code is in `internal/server` (logic), `internal/rpc` (gRPC adapters), `internal/
 - **Reads go through the log** (same path as writes), so they are linearizable at the cost of a log round trip.
 - **Node-to-node wire protocol.** The Raft core treats a reply as an independent message that may be lost, late, or duplicated, so the wire protocol is one fire-and-forget `Raft.Step(RaftMessage)` RPC with a `oneof` payload, rather than request/response pairs. The sender never blocks: each peer has a bounded queue and a message that does not fit is dropped, which Raft's retransmission tolerates. This matters because the node holds its lock while sending.
 - **Redirects.** A non-leader answers with the address it believes the leader has (`-client-addrs` lets nodes advertise addresses clients can actually reach, which differ from in-cluster addresses under Docker).
-- **Known gap: no PreVote.** A node that rejoins with an out-of-date log can bump its term by campaigning and force an extra election (observed in the live demo: a restarted node went through terms 6 and 7 before the cluster settled). The Raft thesis (section 9.6) describes PreVote to prevent this; a candidate-to-be first asks whether it would win before incrementing its term.
+- **PreVote** is implemented; see the Raft implementation notes above. (It was a documented gap until the live demo showed a restarted node forcing an extra election.)
 
 ## Linearizability checking
 
