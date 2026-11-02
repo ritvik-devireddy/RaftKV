@@ -16,7 +16,7 @@ service KV {
 // Raft is the node-to-node API. The Raft core is message-passing: a vote
 // request and its reply are two independent messages, not a call and its
 // return value, and either may be lost or arrive late. So the wire protocol is
-// one fire-and-forget RPC that carries any of the four message kinds, and the
+// one fire-and-forget RPC that carries any of the six message kinds, and the
 // receiver feeds it straight into the node.
 service Raft {
   rpc Step(RaftMessage) returns (StepAck);
@@ -92,6 +92,8 @@ message RaftMessage {
     RequestVoteResponse request_vote_reply = 4;
     AppendEntriesRequest append_entries = 5;
     AppendEntriesResponse append_entries_reply = 6;
+    PreVoteRequest pre_vote = 7;
+    PreVoteResponse pre_vote_reply = 8;
   }
 }
 
@@ -107,6 +109,20 @@ message RequestVoteRequest {
 message RequestVoteResponse {
   uint64 term = 1;
   bool vote_granted = 2;
+}
+
+// PreVote asks "would you vote for me?" without anyone changing term or vote.
+// term is the term the candidate WOULD use (its current term plus one).
+message PreVoteRequest {
+  uint64 term = 1;
+  int32 candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+message PreVoteResponse {
+  uint64 term = 1;          // replier's current term
+  uint64 pre_vote_term = 2; // the term that was asked about, echoed back
+  bool vote_granted = 3;
 }
 
 message AppendEntriesRequest {

@@ -16,6 +16,9 @@ func TestMessagesRoundTripThroughProtobuf(t *testing.T) {
 	msgs := []raft.Message{
 		{From: 1, To: 2, Payload: raft.RequestVoteArgs{Term: 7, CandidateID: 1, LastLogIndex: 9, LastLogTerm: 6}},
 		{From: 2, To: 1, Payload: raft.RequestVoteReply{Term: 7, VoteGranted: true}},
+		{From: 1, To: 2, Payload: raft.PreVoteArgs{Term: 8, CandidateID: 1, LastLogIndex: 9, LastLogTerm: 6}},
+		{From: 2, To: 1, Payload: raft.PreVoteReply{Term: 7, PreVoteTerm: 8, VoteGranted: true}},
+		{From: 2, To: 1, Payload: raft.PreVoteReply{Term: 9, PreVoteTerm: 8, VoteGranted: false}},
 		{From: 0, To: 1, Payload: raft.AppendEntriesArgs{
 			Term: 3, LeaderID: 0, PrevLogIndex: 4, PrevLogTerm: 2, LeaderCommit: 4,
 			Entries: []raft.LogEntry{{Term: 3, Index: 5, Command: []byte("x")}, {Term: 3, Index: 6}},

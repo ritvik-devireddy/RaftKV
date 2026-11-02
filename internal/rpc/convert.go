@@ -26,6 +26,19 @@ func ToProto(m raft.Message) (*pb.RaftMessage, error) {
 			Term:        uint64(p.Term),
 			VoteGranted: p.VoteGranted,
 		}}
+	case raft.PreVoteArgs:
+		out.Payload = &pb.RaftMessage_PreVote{PreVote: &pb.PreVoteRequest{
+			Term:         uint64(p.Term),
+			CandidateId:  int32(p.CandidateID),
+			LastLogIndex: uint64(p.LastLogIndex),
+			LastLogTerm:  uint64(p.LastLogTerm),
+		}}
+	case raft.PreVoteReply:
+		out.Payload = &pb.RaftMessage_PreVoteReply{PreVoteReply: &pb.PreVoteResponse{
+			Term:        uint64(p.Term),
+			PreVoteTerm: uint64(p.PreVoteTerm),
+			VoteGranted: p.VoteGranted,
+		}}
 	case raft.AppendEntriesArgs:
 		entries := make([]*pb.LogEntry, len(p.Entries))
 		for i, e := range p.Entries {
@@ -68,6 +81,21 @@ func FromProto(m *pb.RaftMessage) (raft.Message, error) {
 		r := p.RequestVoteReply
 		out.Payload = raft.RequestVoteReply{
 			Term:        raft.Term(r.GetTerm()),
+			VoteGranted: r.GetVoteGranted(),
+		}
+	case *pb.RaftMessage_PreVote:
+		r := p.PreVote
+		out.Payload = raft.PreVoteArgs{
+			Term:         raft.Term(r.GetTerm()),
+			CandidateID:  raft.NodeID(r.GetCandidateId()),
+			LastLogIndex: raft.Index(r.GetLastLogIndex()),
+			LastLogTerm:  raft.Term(r.GetLastLogTerm()),
+		}
+	case *pb.RaftMessage_PreVoteReply:
+		r := p.PreVoteReply
+		out.Payload = raft.PreVoteReply{
+			Term:        raft.Term(r.GetTerm()),
+			PreVoteTerm: raft.Term(r.GetPreVoteTerm()),
 			VoteGranted: r.GetVoteGranted(),
 		}
 	case *pb.RaftMessage_AppendEntries:

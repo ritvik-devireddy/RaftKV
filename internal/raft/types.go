@@ -94,6 +94,26 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+// PreVoteArgs asks "would you vote for me if I started an election?" without
+// anyone changing term or vote (Raft thesis, section 9.6). Term is the term
+// the candidate WOULD use (its current term plus one); its own term is not
+// changed by asking.
+type PreVoteArgs struct {
+	Term         Term
+	CandidateID  NodeID
+	LastLogIndex Index
+	LastLogTerm  Term
+}
+
+// PreVoteReply answers a PreVoteArgs. Term is the replier's current term (so a
+// candidate that is behind can catch up) and PreVoteTerm echoes the asked-about
+// term so a late reply to an old round is ignored.
+type PreVoteReply struct {
+	Term        Term
+	PreVoteTerm Term
+	VoteGranted bool
+}
+
 type AppendEntriesArgs struct {
 	Term         Term
 	LeaderID     NodeID
@@ -119,8 +139,8 @@ type AppendEntriesReply struct {
 	LastLogIndex Index
 }
 
-// Message is the envelope the Transport carries. Payload is one of the four
-// RPC types above.
+// Message is the envelope the Transport carries. Payload is one of the RPC
+// types above.
 type Message struct {
 	From    NodeID
 	To      NodeID

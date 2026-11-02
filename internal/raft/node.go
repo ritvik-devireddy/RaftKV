@@ -44,6 +44,11 @@ type Node struct {
 
 	votes map[NodeID]bool // candidate only: who has voted for us this term
 
+	// preVotes is non-nil while this node is asking whether it could win an
+	// election (PreVote). It is a follower in every other respect: its term
+	// and vote are untouched, and nothing about it is persisted.
+	preVotes map[NodeID]bool
+
 	// Leader only, reinitialized after every election (Figure 2).
 	nextIndex  map[NodeID]Index // next log index to send to each peer
 	matchIndex map[NodeID]Index // highest index known to be replicated on each peer
@@ -131,7 +136,7 @@ func (n *Node) Tick() {
 
 	n.electionElapsed++
 	if n.electionElapsed >= n.electionTimeout {
-		n.startElection()
+		n.startPreVote()
 	}
 }
 
@@ -146,6 +151,10 @@ func (n *Node) Step(msg Message) {
 		n.handleRequestVote(msg.From, p)
 	case RequestVoteReply:
 		n.handleRequestVoteReply(msg.From, p)
+	case PreVoteArgs:
+		n.handlePreVote(msg.From, p)
+	case PreVoteReply:
+		n.handlePreVoteReply(msg.From, p)
 	case AppendEntriesArgs:
 		n.handleAppendEntries(msg.From, p)
 	case AppendEntriesReply:
@@ -193,9 +202,75 @@ func (n *Node) Status() Status {
 
 // ---- elections ----
 
+// startPreVote runs when the election timer fires. Instead of raising its term
+// at once, the node first asks the others whether they would vote for it. A
+// node that is cut off from the cluster therefore never raises its term (no
+// one answers), and when it comes back it cannot depose a healthy leader.
+// Only if a majority says yes does it start a real election.
+func (n *Node) startPreVote() {
+	n.role = Follower // a candidate whose election failed goes back to being a follower
+	n.leaderID = NoLeader
+	n.votes = nil
+	n.preVotes = map[NodeID]bool{n.cfg.ID: true}
+	n.resetElectionTimer()
+
+	// A single-node cluster needs no one's permission.
+	if len(n.preVotes) >= n.majority() {
+		n.startElection()
+		return
+	}
+
+	lastIndex, lastTerm := n.lastLog()
+	for _, peer := range n.cfg.Peers {
+		if peer == n.cfg.ID {
+			continue
+		}
+		n.send(peer, PreVoteArgs{
+			Term:         n.currentTerm + 1,
+			CandidateID:  n.cfg.ID,
+			LastLogIndex: lastIndex,
+			LastLogTerm:  lastTerm,
+		})
+	}
+}
+
+// handlePreVote answers "would you vote for me?". It changes nothing: no term,
+// no vote, no timer, no disk write. It says yes only if a real RequestVote at
+// that term would succeed AND this node has not heard from a leader recently
+// (a node following a live leader refuses, which is the whole point).
+func (n *Node) handlePreVote(from NodeID, args PreVoteArgs) {
+	heardFromLeader := n.role == Leader ||
+		(n.leaderID != NoLeader && n.electionElapsed < n.cfg.ElectionTickMin)
+
+	grant := args.Term > n.currentTerm &&
+		!heardFromLeader &&
+		n.logUpToDate(args.LastLogIndex, args.LastLogTerm)
+
+	n.send(from, PreVoteReply{Term: n.currentTerm, PreVoteTerm: args.Term, VoteGranted: grant})
+}
+
+func (n *Node) handlePreVoteReply(from NodeID, reply PreVoteReply) {
+	// A reply that shows we are behind is how any node learns of a newer term.
+	if reply.Term > n.currentTerm {
+		n.stepDown(reply.Term)
+		return
+	}
+	// Ignore replies when we are not pre-voting, or that answer an older round.
+	if n.preVotes == nil || reply.PreVoteTerm != n.currentTerm+1 {
+		return
+	}
+	if reply.VoteGranted {
+		n.preVotes[from] = true
+		if len(n.preVotes) >= n.majority() {
+			n.startElection()
+		}
+	}
+}
+
 // startElection moves to a new term as a candidate, votes for itself, and
 // asks everyone else for their vote. Figure 2, "Rules for Servers: Candidates".
 func (n *Node) startElection() {
+	n.preVotes = nil
 	n.currentTerm++
 	n.role = Candidate
 	n.leaderID = NoLeader
@@ -269,6 +344,7 @@ func (n *Node) handleRequestVoteReply(from NodeID, reply RequestVoteReply) {
 }
 
 func (n *Node) becomeLeader() {
+	n.preVotes = nil
 	n.role = Leader
 	n.leaderID = n.cfg.ID
 	n.votes = nil
@@ -304,6 +380,7 @@ func (n *Node) stepDown(term Term) {
 	n.role = Follower
 	n.leaderID = NoLeader
 	n.votes = nil
+	n.preVotes = nil
 	n.nextIndex = nil
 	n.matchIndex = nil
 	n.resetElectionTimer()
@@ -313,11 +390,17 @@ func (n *Node) stepDown(term Term) {
 // a candidate's log must be at least as up to date as the voter's, comparing
 // the term of the last entry first and the log length second.
 func (n *Node) candidateUpToDate(args RequestVoteArgs) bool {
-	lastIndex, lastTerm := n.lastLog()
-	if args.LastLogTerm != lastTerm {
-		return args.LastLogTerm > lastTerm
+	return n.logUpToDate(args.LastLogIndex, args.LastLogTerm)
+}
+
+// logUpToDate reports whether a log ending at (lastIndex, lastTerm) is at
+// least as up to date as this node's own.
+func (n *Node) logUpToDate(lastIndex Index, lastTerm Term) bool {
+	myIndex, myTerm := n.lastLog()
+	if lastTerm != myTerm {
+		return lastTerm > myTerm
 	}
-	return args.LastLogIndex >= lastIndex
+	return lastIndex >= myIndex
 }
 
 // ---- replication: leader side ----
@@ -445,6 +528,7 @@ func (n *Node) handleAppendEntries(from NodeID, args AppendEntriesArgs) {
 	}
 	n.leaderID = args.LeaderID
 	n.electionElapsed = 0
+	n.preVotes = nil // there is a live leader; stop asking for votes
 
 	// Consistency check (Figure 2, rule 2): our log must contain an entry at
 	// PrevLogIndex whose term matches. If not, say so, and say how long our

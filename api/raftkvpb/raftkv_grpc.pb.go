@@ -251,7 +251,7 @@ const (
 // Raft is the node-to-node API. The Raft core is message-passing: a vote
 // request and its reply are two independent messages, not a call and its
 // return value, and either may be lost or arrive late. So the wire protocol is
-// one fire-and-forget RPC that carries any of the four message kinds, and the
+// one fire-and-forget RPC that carries any of the six message kinds, and the
 // receiver feeds it straight into the node.
 type RaftClient interface {
 	Step(ctx context.Context, in *RaftMessage, opts ...grpc.CallOption) (*StepAck, error)
@@ -282,7 +282,7 @@ func (c *raftClient) Step(ctx context.Context, in *RaftMessage, opts ...grpc.Cal
 // Raft is the node-to-node API. The Raft core is message-passing: a vote
 // request and its reply are two independent messages, not a call and its
 // return value, and either may be lost or arrive late. So the wire protocol is
-// one fire-and-forget RPC that carries any of the four message kinds, and the
+// one fire-and-forget RPC that carries any of the six message kinds, and the
 // receiver feeds it straight into the node.
 type RaftServer interface {
 	Step(context.Context, *RaftMessage) (*StepAck, error)
