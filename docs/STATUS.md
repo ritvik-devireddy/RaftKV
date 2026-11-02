@@ -2,7 +2,7 @@
 
 This file is the full context for continuing the project in a new session. It is written for an AI pair-programmer (Claude) picking the work up cold, and doubles as an engineering log. Read it end to end before changing anything.
 
-Last updated: Phase 5 code complete, awaiting first run on the real Porcupine library (2026-10-31).
+Last updated: Phase 5 complete and pushed (2026-11-01). See docs/HANDOFF.md for the most detailed handoff.
 
 ## 1. What this is and why
 
@@ -30,7 +30,7 @@ The project's selling point is not "implements Raft" but "demonstrably correct u
 | 2 | Log replication, commit, Figure 8 rule, no-op on election | done, pushed (55c1ae8) |
 | 3 | Durability: WAL, crash recovery, crash injection | done, pushed (7843ff7), CI green |
 | 4 | gRPC API, server binary, CLI, Docker Compose | done, pushed (88e9122 plus doc update); all tests pass with `-race` on his machine; live 3-node demo verified (put/get, kill leader, writes continue, restarted node recovers from WAL and catches up) |
-| 5 | Porcupine linearizability, seeded chaos runs | code written; passes against a local stand-in for Porcupine (same API, own search); **needs the first run against the real library on Ritvik's machine** |
+| 5 | Porcupine linearizability, seeded chaos runs | done, pushed (3d497bf); 200 seeds linearizable with real Porcupine v1.3.1 under -race; 2000-seed soak pending |
 | 6 | Snapshots and log compaction, benchmarks, README diagram, design-doc polish | not started |
 
 ### Phase 4 status
@@ -95,7 +95,7 @@ clients ── gRPC KV service ──► internal/rpc.KVService
 - `internal/chaos`: `World` runs real `server.Server` nodes on simnet with fault-injecting storage, partitions (random splits and leader isolation), crash/restart, and message loss; step-driven clients (one operation in flight each, one `(ClientID, Seq)` reused across retries) record `Op{Call, Return, Result, Done}` in virtual nanoseconds. `Done=false` means the outcome is unknown (client gave up or walked away): it may or may not have happened. Deterministic per seed (`TestRunsAreDeterministic`). Deliberate-bug options `StaleReads` and `NoDedup` exist for validating the checker.
 - `test/linearizability`: `model.go` is the per-key Porcupine model (partitioned by key; unknown outcomes get return time MaxInt64 and an always-accepted output); `chaos_test.go` has `TestLinearizableUnderChaos` (default 200 seeds; env `RAFTKV_CHAOS_SEEDS` / `RAFTKV_CHAOS_FIRST_SEED`), two tests that require the checker to flag a deliberately broken system, and `TestModelOnHandWrittenHistories` (14 small histories).
 - Validation done in the container against a local stand-in for Porcupine (same API, memoized DFS), not the real library: 200+ seeds linearizable; both harness-level bugs caught; real-code mutations caught within a few seeds (commit without majority, votes ignoring log recency, server waiter ignoring terms, dedup returning wrong result). The Figure 8 mutant survived 3,000 chaos seeds and is caught only by the targeted unit test (documented in `docs/design.md`).
-- **Pending on Ritvik's machine:** `go get github.com/anishathalye/porcupine && go mod tidy`, then `go test -race -count=1 ./...`. If the real library behaves differently from the stand-in (API mismatch, or the real checker reports a violation the stand-in missed), treat it as the interesting result and investigate that seed first.
+- Verified on Ritvik's machine with real Porcupine v1.3.1: all tests pass with `-race` (linearizability package 8.7s). Pending: the 2000-seed soak run and CI status on 3d497bf. See `docs/HANDOFF.md` for the full, current handoff.
 - Possible extensions: more fault types (message duplication/reordering is partly covered by simnet delays; add clock skew only if timeouts ever depend on wall time), longer soak runs, history of operations across leader restarts with larger clusters.
 
 ## 8. Phase 6 plan
