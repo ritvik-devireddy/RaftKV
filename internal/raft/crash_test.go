@@ -79,6 +79,16 @@ func (s *crashStorage) TruncateFrom(index Index) error {
 	return s.MemoryStorage.TruncateFrom(index)
 }
 
+func (s *crashStorage) SaveSnapshot(snap Snapshot) error {
+	if s.hit() {
+		if s.applyOp {
+			s.MemoryStorage.SaveSnapshot(snap)
+		}
+		panic(errCrash)
+	}
+	return s.MemoryStorage.SaveSnapshot(snap)
+}
+
 // guard runs fn against node id and turns an injected crash into a node going
 // down. It reports whether a crash happened.
 func (c *cluster) guard(id int, fn func()) (crashed bool) {

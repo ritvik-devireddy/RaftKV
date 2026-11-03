@@ -36,8 +36,37 @@ type Storage interface {
 	Append(entries []LogEntry) error
 	// TruncateFrom deletes the entry at index and everything after it.
 	TruncateFrom(index Index) error
+	// SaveSnapshot durably records a snapshot and discards the log entries it
+	// covers, as PersistentState.ApplySnapshot defines: entries after
+	// snap.Index survive only if the stored log has an entry at snap.Index
+	// with term snap.Term. It must be atomic: after a crash the storage holds
+	// either the old snapshot and log, or the new ones, never a mixture. The
+	// snapshot's index must be greater than the current snapshot's.
+	SaveSnapshot(snap Snapshot) error
 	// Load returns everything that has been saved.
 	Load() (PersistentState, error)
+}
+
+// ApplySnapshot makes snap the state's snapshot and removes the log entries it
+// covers (those with index <= snap.Index).
+//
+// The entries after snap.Index are kept only if the log has an entry at
+// snap.Index whose term is snap.Term: then the snapshot is just a prefix of this
+// log. If it does not (the log is shorter, or disagrees with the snapshot's last
+// entry), nothing in it can be trusted and the whole log is discarded.
+//
+// Node, MemoryStorage and the write-ahead log all use this one function, so
+// they cannot disagree about what a snapshot does to a log. snap.Index must be
+// greater than s.Snapshot.Index.
+func (s *PersistentState) ApplySnapshot(snap Snapshot) {
+	var tail []LogEntry
+	if snap.Index > s.Snapshot.Index {
+		if pos := snap.Index - s.Snapshot.Index; pos <= Index(len(s.Log)) && s.Log[pos-1].Term == snap.Term {
+			tail = append([]LogEntry(nil), s.Log[pos:]...)
+		}
+	}
+	s.Snapshot = Snapshot{Index: snap.Index, Term: snap.Term, Data: append([]byte(nil), snap.Data...)}
+	s.Log = tail
 }
 
 // MemoryStorage is an in-memory Storage for tests. It survives a simulated
@@ -93,6 +122,16 @@ func (m *MemoryStorage) TruncateFrom(index Index) error {
 	return nil
 }
 
+func (m *MemoryStorage) SaveSnapshot(snap Snapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if snap.Index == 0 || snap.Index <= m.state.Snapshot.Index {
+		return fmt.Errorf("snapshot: index %d does not advance past the current snapshot at %d", snap.Index, m.state.Snapshot.Index)
+	}
+	m.state.ApplySnapshot(snap)
+	return nil
+}
+
 func (m *MemoryStorage) Load() (PersistentState, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -101,5 +140,6 @@ func (m *MemoryStorage) Load() (PersistentState, error) {
 
 func clone(s PersistentState) PersistentState {
 	s.Log = append([]LogEntry(nil), s.Log...)
+	s.Snapshot.Data = append([]byte(nil), s.Snapshot.Data...)
 	return s
 }

@@ -57,7 +57,7 @@ func TestEmptyWALLoadsInitialState(t *testing.T) {
 
 // The WAL must behave exactly like MemoryStorage, including across reopens.
 func TestWALMatchesMemoryStorageModel(t *testing.T) {
-	for seed := int64(1); seed <= 20; seed++ {
+	for seed := int64(1); seed <= 40; seed++ {
 		rng := rand.New(rand.NewSource(seed))
 		dir := t.TempDir()
 		w := openWAL(t, dir)
@@ -69,7 +69,24 @@ func TestWALMatchesMemoryStorageModel(t *testing.T) {
 			// where every open is scanned), so compare every 10th step and
 			// right after every reopen rather than after each operation.
 			check := step%10 == 0
-			switch rng.Intn(10) {
+			switch rng.Intn(12) {
+			case 10, 11:
+				// Compact up to a random point in the log, or install a snapshot that
+				// reaches past it or disagrees with it.
+				cur := mustLoad(t, model)
+				idx := cur.Snapshot.Index + raft.Index(rng.Intn(len(cur.Log)+3)+1)
+				snapTerm := term
+				if pos := int(idx - cur.Snapshot.Index); pos <= len(cur.Log) && rng.Intn(4) != 0 {
+					snapTerm = cur.Log[pos-1].Term // a prefix of our own log
+				}
+				snap := raft.Snapshot{Index: idx, Term: snapTerm, Data: bytes.Repeat([]byte{byte(step)}, rng.Intn(50))}
+				if err := w.SaveSnapshot(snap); err != nil {
+					t.Fatal(err)
+				}
+				if err := model.SaveSnapshot(snap); err != nil {
+					t.Fatal(err)
+				}
+				check = true
 			case 0, 1, 2:
 				if rng.Intn(2) == 0 {
 					term += raft.Term(rng.Intn(3))
@@ -80,11 +97,11 @@ func TestWALMatchesMemoryStorageModel(t *testing.T) {
 				}
 				model.SaveHardState(term, vote)
 			case 3:
-				log := mustLoad(t, model).Log
-				if len(log) == 0 {
+				cur := mustLoad(t, model)
+				if len(cur.Log) == 0 {
 					continue
 				}
-				idx := raft.Index(rng.Intn(len(log)) + 1)
+				idx := cur.Snapshot.Index + raft.Index(rng.Intn(len(cur.Log))+1)
 				if err := w.TruncateFrom(idx); err != nil {
 					t.Fatal(err)
 				}
@@ -99,14 +116,14 @@ func TestWALMatchesMemoryStorageModel(t *testing.T) {
 				w = openWAL(t, dir)
 				check = true
 			default:
-				log := mustLoad(t, model).Log
+				cur := mustLoad(t, model)
 				var batch []raft.LogEntry
 				for i := 0; i <= rng.Intn(3); i++ {
 					cmd := ""
 					if rng.Intn(5) != 0 {
 						cmd = string(bytes.Repeat([]byte{byte('a' + rng.Intn(26))}, rng.Intn(40)+1))
 					}
-					batch = append(batch, entry(term, raft.Index(len(log)+i+1), cmd))
+					batch = append(batch, entry(term, cur.Snapshot.Index+raft.Index(len(cur.Log)+i+1), cmd))
 				}
 				if err := w.Append(batch); err != nil {
 					t.Fatal(err)

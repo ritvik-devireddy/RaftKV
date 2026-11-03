@@ -64,3 +64,13 @@ func (s *faultStorage) TruncateFrom(index raft.Index) error {
 	}
 	return s.MemoryStorage.TruncateFrom(index)
 }
+
+func (s *faultStorage) SaveSnapshot(snap raft.Snapshot) error {
+	if s.hit() {
+		if s.applyOp {
+			s.MemoryStorage.SaveSnapshot(snap)
+		}
+		panic(errCrash)
+	}
+	return s.MemoryStorage.SaveSnapshot(snap)
+}

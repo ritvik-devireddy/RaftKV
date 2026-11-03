@@ -23,6 +23,9 @@ const (
 	recHardState = 1 // term u64, votedFor i64
 	recEntry     = 2 // term u64, index u64, command bytes
 	recTruncate  = 3 // index u64: delete this entry and everything after it
+	recSnapshot  = 4 // index u64, term u64, state machine bytes: see raft.PersistentState.ApplySnapshot
+
+	tmpSuffix = ".tmp" // the file a compaction writes before it replaces the log
 )
 
 var (
@@ -55,6 +58,11 @@ type Options struct {
 // The checksum covers the length field and the body. Every method fsyncs
 // before returning, so once it returns nil the change survives a crash.
 //
+// A snapshot (SaveSnapshot) compacts the file: the live log is rewritten as
+// hard state, then one snapshot record, then the entries after it, into a
+// temporary file that is fsynced and renamed over the log. The rename is atomic,
+// so a crash leaves either the old file or the new one, never a mixture.
+//
 // Recovery (Open) replays the file. A torn final record, the result of a crash
 // in the middle of a write, is discarded and the file is cut back to the last
 // whole record. Damage anywhere else is reported as ErrCorrupt.
@@ -64,11 +72,12 @@ type WAL struct {
 	path string
 	opts Options
 
-	size     int64 // bytes of valid records; the next write goes here
-	term     raft.Term
-	votedFor raft.NodeID
-	logLen   raft.Index
-	poisoned bool
+	size      int64 // bytes of valid records; the next write goes here
+	term      raft.Term
+	votedFor  raft.NodeID
+	snapIndex raft.Index // last index covered by the snapshot (0 = none)
+	lastIndex raft.Index // index of the last entry in the log (snapIndex if it is empty)
+	poisoned  bool
 }
 
 var _ raft.Storage = (*WAL)(nil)
@@ -79,6 +88,11 @@ func Open(dir string, opts Options) (*WAL, error) {
 		return nil, fmt.Errorf("wal: create directory: %w", err)
 	}
 	path := filepath.Join(dir, FileName)
+	// A compaction that crashed before its rename left a temporary file. The
+	// real log is intact, so the leftover is just garbage.
+	if err := os.Remove(path + tmpSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("wal: remove leftover compaction file: %w", err)
+	}
 	_, statErr := os.Stat(path)
 	created := errors.Is(statErr, os.ErrNotExist)
 
@@ -123,7 +137,9 @@ func Open(dir string, opts Options) (*WAL, error) {
 		size:     int64(valid),
 		term:     st.CurrentTerm,
 		votedFor: st.VotedFor,
-		logLen:   raft.Index(len(st.Log)),
+
+		snapIndex: st.Snapshot.Index,
+		lastIndex: st.Snapshot.Index + raft.Index(len(st.Log)),
 	}, nil
 }
 
@@ -171,7 +187,7 @@ func (w *WAL) Append(entries []raft.LogEntry) error {
 	}
 	var buf []byte
 	for i, e := range entries {
-		if want := w.logLen + raft.Index(i) + 1; e.Index != want {
+		if want := w.lastIndex + raft.Index(i) + 1; e.Index != want {
 			return fmt.Errorf("wal: append index %d, want %d", e.Index, want)
 		}
 		if 17+len(e.Command) > maxBody {
@@ -187,7 +203,7 @@ func (w *WAL) Append(entries []raft.LogEntry) error {
 	if err := w.write(buf); err != nil {
 		return err
 	}
-	w.logLen += raft.Index(len(entries))
+	w.lastIndex += raft.Index(len(entries))
 	return nil
 }
 
@@ -197,8 +213,8 @@ func (w *WAL) TruncateFrom(index raft.Index) error {
 	if w.poisoned {
 		return ErrPoisoned
 	}
-	if index < 1 || index > w.logLen {
-		return fmt.Errorf("wal: truncate index %d outside log of length %d", index, w.logLen)
+	if index <= w.snapIndex || index > w.lastIndex {
+		return fmt.Errorf("wal: truncate index %d outside the log (%d, %d]", index, w.snapIndex, w.lastIndex)
 	}
 	body := make([]byte, 9)
 	body[0] = recTruncate
@@ -206,8 +222,111 @@ func (w *WAL) TruncateFrom(index raft.Index) error {
 	if err := w.write(frame(body)); err != nil {
 		return err
 	}
-	w.logLen = index - 1
+	w.lastIndex = index - 1
 	return nil
+}
+
+// SaveSnapshot compacts the log: it records snap and drops the entries it
+// covers (see raft.PersistentState.ApplySnapshot). The file is rewritten, which
+// is why a snapshot is taken every few thousand entries and not on every write.
+//
+// If anything fails before the rename, the log on disk is untouched and the WAL
+// stays usable. A failure after the old file has been closed leaves it with no
+// handle, so it is poisoned and a fresh Open recovers whichever file won.
+func (w *WAL) SaveSnapshot(snap raft.Snapshot) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.poisoned {
+		return ErrPoisoned
+	}
+	if snap.Index == 0 || snap.Index <= w.snapIndex {
+		return fmt.Errorf("wal: snapshot index %d does not advance past the current snapshot at %d", snap.Index, w.snapIndex)
+	}
+	if 17+len(snap.Data) > maxBody {
+		return ErrTooLarge
+	}
+
+	// The file is the source of truth for what is in the log.
+	data, err := os.ReadFile(w.path)
+	if err != nil {
+		return fmt.Errorf("wal: read for compaction: %w", err)
+	}
+	st, _, err := replay(data)
+	if err != nil {
+		return err
+	}
+	st.ApplySnapshot(snap)
+
+	body := make([]byte, 17+len(snap.Data))
+	body[0] = recSnapshot
+	binary.LittleEndian.PutUint64(body[1:], uint64(st.Snapshot.Index))
+	binary.LittleEndian.PutUint64(body[9:], uint64(st.Snapshot.Term))
+	copy(body[17:], snap.Data)
+	hard := make([]byte, 17)
+	hard[0] = recHardState
+	binary.LittleEndian.PutUint64(hard[1:], uint64(st.CurrentTerm))
+	binary.LittleEndian.PutUint64(hard[9:], uint64(st.VotedFor))
+
+	buf := append(frame(hard), frame(body)...)
+	for _, e := range st.Log {
+		eb := make([]byte, 17+len(e.Command))
+		eb[0] = recEntry
+		binary.LittleEndian.PutUint64(eb[1:], uint64(e.Term))
+		binary.LittleEndian.PutUint64(eb[9:], uint64(e.Index))
+		copy(eb[17:], e.Command)
+		buf = append(buf, frame(eb)...)
+	}
+
+	tmp := w.path + tmpSuffix
+	if err := w.writeTemp(tmp, buf); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	// Past this point the old handle is gone. (Windows will not rename over a
+	// file that is still open.)
+	w.poisoned = true
+	if err := w.f.Close(); err != nil {
+		return fmt.Errorf("wal: close before compaction: %w", err)
+	}
+	if err := os.Rename(tmp, w.path); err != nil {
+		return fmt.Errorf("wal: replace log: %w", err)
+	}
+	if !w.opts.NoSync {
+		if err := syncDir(filepath.Dir(w.path)); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(w.path, os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("wal: reopen after compaction: %w", err)
+	}
+	w.f = f
+	w.size = int64(len(buf))
+	w.term, w.votedFor = st.CurrentTerm, st.VotedFor
+	w.snapIndex = st.Snapshot.Index
+	w.lastIndex = st.Snapshot.Index + raft.Index(len(st.Log))
+	w.poisoned = false
+	return nil
+}
+
+// writeTemp writes buf to a new file at path and makes it durable.
+func (w *WAL) writeTemp(path string, buf []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("wal: create compaction file: %w", err)
+	}
+	if _, err := f.Write(buf); err != nil {
+		f.Close()
+		return fmt.Errorf("wal: write compaction file: %w", err)
+	}
+	if !w.opts.NoSync {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return fmt.Errorf("wal: sync compaction file: %w", err)
+		}
+	}
+	return f.Close()
 }
 
 // Load replays the file, so it always reflects exactly what is on disk.
@@ -328,7 +447,7 @@ func apply(st *raft.PersistentState, body []byte) error {
 			Term:  raft.Term(binary.LittleEndian.Uint64(body[1:])),
 			Index: raft.Index(binary.LittleEndian.Uint64(body[9:])),
 		}
-		if want := raft.Index(len(st.Log)) + 1; e.Index != want {
+		if want := st.Snapshot.Index + raft.Index(len(st.Log)) + 1; e.Index != want {
 			return fmt.Errorf("entry index %d, want %d", e.Index, want)
 		}
 		if len(body) > 17 {
@@ -340,10 +459,24 @@ func apply(st *raft.PersistentState, body []byte) error {
 			return fmt.Errorf("truncate record has length %d", len(body))
 		}
 		idx := raft.Index(binary.LittleEndian.Uint64(body[1:]))
-		if idx < 1 || idx > raft.Index(len(st.Log)) {
-			return fmt.Errorf("truncate at %d outside log of length %d", idx, len(st.Log))
+		base := st.Snapshot.Index
+		if idx <= base || idx > base+raft.Index(len(st.Log)) {
+			return fmt.Errorf("truncate at %d outside the log (%d, %d]", idx, base, base+raft.Index(len(st.Log)))
 		}
-		st.Log = st.Log[:idx-1]
+		st.Log = st.Log[:idx-base-1]
+	case recSnapshot:
+		if len(body) < 17 {
+			return fmt.Errorf("snapshot record has length %d", len(body))
+		}
+		snap := raft.Snapshot{
+			Index: raft.Index(binary.LittleEndian.Uint64(body[1:])),
+			Term:  raft.Term(binary.LittleEndian.Uint64(body[9:])),
+			Data:  body[17:],
+		}
+		if snap.Index == 0 || snap.Index <= st.Snapshot.Index {
+			return fmt.Errorf("snapshot at %d does not advance past the snapshot at %d", snap.Index, st.Snapshot.Index)
+		}
+		st.ApplySnapshot(snap)
 	default:
 		return fmt.Errorf("unknown record type %d", body[0])
 	}
