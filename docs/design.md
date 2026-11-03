@@ -1,6 +1,6 @@
 # RaftKV design notes
 
-This document records decisions, tradeoffs, and the bugs the chaos tester found. Fill it in as you build, not at the end.
+This document records decisions, tradeoffs, and the bugs the chaos tester found.
 
 ## Goals and non-goals
 
@@ -10,11 +10,46 @@ This document records decisions, tradeoffs, and the bugs the chaos tester found.
 - Every claim of correctness backed by a reproducible test.
 
 **Non-goals**
-- Sharding, multi-region, dynamic membership (unless time allows), a web UI.
+- Sharding, multi-region, dynamic membership.
 
 ## Architecture
 
-TODO: diagram and a one-paragraph description of each layer.
+Each node runs four layers. The **server** (`internal/server`) accepts client commands, hands them to Raft, waits for them to commit, and replies, redirecting to the leader when it is not the leader. The **Raft core** (`internal/raft`) is a pure state machine: it is driven only by `Tick` (logical time), `Step` (an incoming message), and `Propose`, and it reaches the outside world only through a `Transport` and a `Storage` interface. The **state machine** (`internal/kv`) applies committed commands in order and deduplicates retries by `(ClientID, Seq)`. The **WAL** (`internal/storage`) is the durable log: checksummed, fsynced before any reply.
+
+```mermaid
+flowchart LR
+    client["client / CLI<br/>finds the leader, retries safely"]
+    subgraph leader["node (leader)"]
+        srv["server<br/>commit waiting, redirects"] --> raftc["Raft core"]
+        srv --> kvs["KV store + dedup"]
+        raftc --> wal[("WAL<br/>CRC + fsync")]
+    end
+    f1["node (follower)"]
+    f2["node (follower)"]
+    client -->|"gRPC KV API"| srv
+    raftc <-->|"gRPC Raft messages"| f1
+    raftc <-->|"gRPC Raft messages"| f2
+    f1 <--> f2
+```
+
+**Why the Raft core is built this way.** It never reads a clock, opens a socket, or touches a file. In production the interfaces are backed by gRPC and the WAL. In tests the same core runs on a seeded virtual network and in-memory storage that can crash on command, so a whole cluster runs in one thread and any failure replays exactly from its seed.
+
+```mermaid
+flowchart TB
+    core["Raft core<br/>pure state machine: Tick, Step, Propose"]
+    core --- tr{{"Transport interface"}}
+    core --- st{{"Storage interface"}}
+    tr -->|production| grpc["gRPC transport"]
+    tr -->|tests| sim["simnet: seeded virtual network<br/>drops, delays, partitions"]
+    st -->|production| walp["WAL on disk"]
+    st -->|tests| fault["in-memory storage<br/>with crash injection"]
+    sim --> chaos["chaos world: clients + faults<br/>replayable from a seed"]
+    fault --> chaos
+    chaos --> hist["recorded client history"]
+    hist --> porc["Porcupine: is it linearizable?"]
+```
+
+**Life of a write.** A client sends `Put` with a `(ClientID, Seq)` to any node. A follower answers with the leader's address. The leader appends the command to its log (on disk first, then in memory) and sends it to the followers. Once a majority has stored it, and it belongs to the leader's current term, it is committed. Each node applies committed entries in order, the leader's waiting request completes with the result, and the client gets its reply. A retry with the same `(ClientID, Seq)` returns the saved result instead of applying the command twice.
 
 ## Raft implementation notes
 
