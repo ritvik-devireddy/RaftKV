@@ -41,6 +41,12 @@ type Options struct {
 	PartitionRate float64 // per tick chance of changing the partition; default 0.01
 	AbandonRate   float64 // chance a client walks away right after sending a command; default 0.03
 
+	// SnapshotEvery is how many applied entries make a node compact its log into
+	// a snapshot. The default is small (20) so that runs of a few thousand ticks
+	// compact several times and followers regularly have to be caught up with a
+	// snapshot. Negative disables snapshots.
+	SnapshotEvery int
+
 	// Deliberate bugs, used to prove the checker can fail.
 
 	// StaleReads makes Gets read the contacted node's local state without
@@ -74,6 +80,9 @@ func (o *Options) fill() {
 	if o.AbandonRate == 0 {
 		o.AbandonRate = 0.03
 	}
+	if o.SnapshotEvery == 0 {
+		o.SnapshotEvery = 20
+	}
 }
 
 // Op is one client operation as the client experienced it.
@@ -91,9 +100,34 @@ type Op struct {
 	Done   bool
 }
 
-type simTransport struct{ net *simnet.Network }
+// simTransport sends over the simulated network, counting snapshots sent.
+type simTransport struct {
+	net      *simnet.Network
+	installs *int
+}
 
-func (s simTransport) Send(m raft.Message) { s.net.Send(int(m.From), int(m.To), m) }
+func (s simTransport) Send(m raft.Message) {
+	if _, ok := m.Payload.(raft.InstallSnapshotArgs); ok {
+		*s.installs++
+	}
+	s.net.Send(int(m.From), int(m.To), m)
+}
+
+// Stats says how much of the snapshot machinery a run exercised, so a test can
+// tell a run that compacted its logs from one that never got that far.
+type Stats struct {
+	Snapshots int // snapshots saved, over all nodes (their own compactions and installed ones)
+	Installs  int // InstallSnapshot messages sent
+}
+
+// Stats reports the run so far.
+func (w *World) Stats() Stats {
+	s := Stats{Installs: w.installs}
+	for _, st := range w.stores {
+		s.Snapshots += st.snapshots
+	}
+	return s
+}
 
 // World is a running cluster plus its clients.
 type World struct {
@@ -101,10 +135,11 @@ type World struct {
 	net  *simnet.Network
 	rng  *rand.Rand // fault decisions only
 
-	servers []*server.Server
-	stores  []*faultStorage
-	down    []int // ticks until a crashed node restarts; 0 = up
-	gen     []int // restarts so far per node
+	servers  []*server.Server
+	stores   []*faultStorage
+	down     []int // ticks until a crashed node restarts; 0 = up
+	gen      []int // restarts so far per node
+	installs int   // InstallSnapshot messages sent
 
 	clients []*client
 	history []*Op
@@ -153,8 +188,9 @@ func (w *World) newServer(id int) *server.Server {
 	s, err := server.New(raft.Config{
 		ID: raft.NodeID(id), Peers: peers,
 		ElectionTickMin: 10, ElectionTickMax: 20, HeartbeatTick: 2,
-		Seed: w.opts.Seed + int64(w.gen[id])*7919,
-	}, w.stores[id], simTransport{w.net})
+		SnapshotEvery: max(w.opts.SnapshotEvery, 0),
+		Seed:          w.opts.Seed + int64(w.gen[id])*7919,
+	}, w.stores[id], simTransport{w.net, &w.installs})
 	if err != nil {
 		panic(fmt.Sprintf("chaos: cannot start node %d: %v", id, err))
 	}

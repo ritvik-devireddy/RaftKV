@@ -32,9 +32,10 @@ func envInt(name string, def int) int {
 
 // runSeed simulates one cluster, checks its history, and writes a Porcupine
 // visualization if the history is not linearizable.
-func runSeed(t *testing.T, opts chaos.Options, visualize bool) (porcupine.CheckResult, []chaos.Op) {
+func runSeed(t *testing.T, opts chaos.Options, visualize bool) (porcupine.CheckResult, []chaos.Op, chaos.Stats) {
 	t.Helper()
-	history := chaos.NewWorld(opts).Run(chaosTicks, settleTicks)
+	world := chaos.NewWorld(opts)
+	history := world.Run(chaosTicks, settleTicks)
 	ops := Operations(history)
 	res, info := porcupine.CheckOperationsVerbose(Model, ops, checkBudget)
 	if res == porcupine.Illegal && visualize {
@@ -43,7 +44,7 @@ func runSeed(t *testing.T, opts chaos.Options, visualize bool) (porcupine.CheckR
 			t.Logf("seed %d: wrote the failing history to %s (open it in a browser)", opts.Seed, path)
 		}
 	}
-	return res, history
+	return res, history, world.Stats()
 }
 
 func optionsFor(seed int64) chaos.Options {
@@ -66,8 +67,11 @@ func TestLinearizableUnderChaos(t *testing.T) {
 	count := envInt("RAFTKV_CHAOS_SEEDS", 200)
 
 	var total, done int
+	var stats chaos.Stats
 	for seed := first; seed < first+int64(count); seed++ {
-		res, history := runSeed(t, optionsFor(seed), true)
+		res, history, st := runSeed(t, optionsFor(seed), true)
+		stats.Snapshots += st.Snapshots
+		stats.Installs += st.Installs
 		switch res {
 		case porcupine.Illegal:
 			t.Fatalf("seed %d: history is NOT linearizable.\nreplay: RAFTKV_CHAOS_FIRST_SEED=%d RAFTKV_CHAOS_SEEDS=1 go test ./test/linearizability -run TestLinearizableUnderChaos -v",
@@ -86,7 +90,14 @@ func TestLinearizableUnderChaos(t *testing.T) {
 	if total < 20*count || done*2 < total {
 		t.Fatalf("runs were too quiet to mean anything: %d operations, %d completed", total, done)
 	}
-	t.Logf("%d seeds, %d operations (%d with a known outcome): all linearizable", count, total, done)
+	// Nodes compact their logs in these runs (every 20 applied entries). If they
+	// never did, or never had to catch a follower up from a snapshot, "all
+	// linearizable" would not cover the snapshot code at all.
+	if stats.Snapshots < count || (count >= 20 && stats.Installs == 0) {
+		t.Fatalf("the runs barely exercised snapshots: %d saved, %d sent in %d seeds", stats.Snapshots, stats.Installs, count)
+	}
+	t.Logf("%d seeds, %d operations (%d with a known outcome), %d snapshots saved, %d InstallSnapshot messages: all linearizable",
+		count, total, done, stats.Snapshots, stats.Installs)
 }
 
 // The checker is only worth something if it can fail. These tests run the
@@ -116,7 +127,7 @@ func requireViolation(t *testing.T, name string, opts func(seed int64) chaos.Opt
 	t.Helper()
 	const maxSeeds = 150
 	for seed := int64(1); seed <= maxSeeds; seed++ {
-		if res, _ := runSeed(t, opts(seed), false); res == porcupine.Illegal {
+		if res, _, _ := runSeed(t, opts(seed), false); res == porcupine.Illegal {
 			t.Logf("%s: caught at seed %d", name, seed)
 			return
 		}

@@ -63,3 +63,32 @@ func TestChaosRunMakesProgress(t *testing.T) {
 	}
 	t.Logf("%d of %d operations completed", done, total)
 }
+
+// Snapshots are on by default, so a chaos run compacts logs, restarts nodes
+// from snapshots and catches followers up with them. The runs must really get
+// that far, or checking them for linearizability would say nothing about it.
+func TestChaosRunsCompactAndInstallSnapshots(t *testing.T) {
+	var snapshots, installs int
+	for seed := int64(1); seed <= 20; seed++ {
+		w := NewWorld(Options{Seed: seed, Nodes: 3 + 2*int(seed%2)})
+		w.Run(1500, 1500)
+		st := w.Stats()
+		if st.Snapshots == 0 {
+			t.Fatalf("seed %d: no node ever compacted its log", seed)
+		}
+		snapshots += st.Snapshots
+		installs += st.Installs
+	}
+	if installs == 0 {
+		t.Fatal("no InstallSnapshot was sent in 20 runs")
+	}
+	t.Logf("20 runs: %d snapshots saved, %d InstallSnapshot messages", snapshots, installs)
+}
+
+func TestSnapshotsCanBeSwitchedOff(t *testing.T) {
+	w := NewWorld(Options{Seed: 3, SnapshotEvery: -1})
+	w.Run(1500, 1500)
+	if st := w.Stats(); st.Snapshots != 0 || st.Installs != 0 {
+		t.Fatalf("snapshots were taken with SnapshotEvery < 0: %+v", st)
+	}
+}

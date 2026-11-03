@@ -80,9 +80,12 @@ type Server struct {
 	order   []raft.Index // FIFO of recent's keys, for eviction
 }
 
-// New creates the node. cfg.Apply is overwritten: the server owns the state
-// machine. Entries committed before a restart are applied again as the node
-// relearns the commit index, which rebuilds the store from the log.
+// New creates the node. cfg.Apply, cfg.Snapshot and cfg.Restore are
+// overwritten: the server owns the state machine. On a restart the store is
+// first restored from the node's saved snapshot (if it has one), and the entries
+// committed after it are applied again as the node relearns the commit index.
+// cfg.SnapshotEvery (0 = never) says how many applied entries trigger a new
+// snapshot and log compaction.
 func New(cfg raft.Config, storage raft.Storage, transport raft.Transport) (*Server, error) {
 	s := &Server{
 		store:   kv.NewStore(),
@@ -90,6 +93,8 @@ func New(cfg raft.Config, storage raft.Storage, transport raft.Transport) (*Serv
 		recent:  make(map[raft.Index]applied),
 	}
 	cfg.Apply = s.apply
+	cfg.Snapshot = s.store.MarshalState // the node calls it between applies, so the store is quiet
+	cfg.Restore = s.restore
 	n, err := raft.NewNode(cfg, storage, transport)
 	if err != nil {
 		return nil, err
@@ -134,6 +139,32 @@ func (s *Server) apply(e raft.LogEntry) {
 		delete(s.recent, s.order[0])
 		s.order = s.order[1:]
 	}
+}
+
+// restore replaces the store with a snapshot, on startup or when a leader's
+// snapshot is installed. Like apply it runs under the Raft node's lock.
+func (s *Server) restore(snap raft.Snapshot) {
+	if err := s.store.UnmarshalState(snap.Data); err != nil {
+		// The snapshot is checksummed on disk and came from a peer running the
+		// same code, so this means a bug. Carrying on with a half-restored
+		// store would diverge the replicas.
+		panic(fmt.Sprintf("server: snapshot at index %d does not decode: %v", snap.Index, err))
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Entries up to snap.Index will never be applied here, so a command this node
+	// proposed at one of those indexes will never hear its result. Fail it: the
+	// client retries with the same (ClientID, Seq) and dedup, which is in the
+	// snapshot, returns the original result if the command did commit.
+	for idx, w := range s.waiters {
+		if idx <= snap.Index {
+			delete(s.waiters, idx)
+			w.p.finish(kv.Result{}, ErrLostLeadership)
+		}
+	}
+	// recent holds results of entries this node applied, which are committed and
+	// so stay valid; it is bounded by its own eviction.
 }
 
 // Submit offers a command to the Raft log. It fails at once with

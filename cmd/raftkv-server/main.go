@@ -38,10 +38,16 @@ func main() {
 	electionMax := flag.Int("election-max", 20, "maximum election timeout, in ticks")
 	heartbeat := flag.Int("heartbeat", 2, "heartbeat interval, in ticks")
 	timeout := flag.Duration("request-timeout", 5*time.Second, "how long a client request may wait to commit")
+	snapshotEvery := flag.Int("snapshot-every", 1000, "compact the log into a snapshot after this many applied entries (0 = never)")
 	noSync := flag.Bool("no-sync", false, "skip fsync (UNSAFE: acknowledged writes can be lost on a crash; for benchmarks only)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("node", *id)
+
+	if *snapshotEvery < 0 {
+		log.Error("-snapshot-every must not be negative", "value", *snapshotEvery)
+		os.Exit(2)
+	}
 
 	addrs := splitList(*peers)
 	if len(addrs) == 0 || *id < 0 || *id >= len(addrs) {
@@ -84,6 +90,7 @@ func main() {
 		ElectionTickMin: *electionMin,
 		ElectionTickMax: *electionMax,
 		HeartbeatTick:   *heartbeat,
+		SnapshotEvery:   *snapshotEvery,
 		Seed:            time.Now().UnixNano(),
 	}, wal, transport)
 	if err != nil {
@@ -113,7 +120,7 @@ func main() {
 	}()
 
 	st := srv.Status()
-	log.Info("node started", "listen", *listen, "peers", addrs, "term", st.Term, "log_len", st.LastLogIndex)
+	log.Info("node started", "listen", *listen, "peers", addrs, "term", st.Term, "last_index", st.LastLogIndex, "snapshot_index", st.SnapshotIndex)
 
 	<-ctx.Done()
 	log.Info("shutting down")

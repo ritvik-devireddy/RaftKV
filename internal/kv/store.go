@@ -62,8 +62,10 @@ func NewStore() *Store {
 // Seq is not newer than the client's last applied Seq is a retry: it is not
 // executed again and the cached result is returned.
 //
-// TODO(snapshots): sessions grow without bound; include them in snapshots and
-// expire idle clients.
+// The sessions table is part of the replicated state and of every snapshot
+// (see MarshalState): a replica restored from a snapshot must still recognize a
+// retry of a command that was applied before it. It grows with the number of
+// distinct clients ever seen; expiring idle clients is future work.
 func (s *Store) Apply(cmd Command) Result {
 	if cmd.ClientID != "" {
 		if sess, ok := s.sessions[cmd.ClientID]; ok && cmd.Seq <= sess.lastSeq {
@@ -107,8 +109,9 @@ func (s *Store) execute(cmd Command) Result {
 	}
 }
 
-// Snapshot returns a copy of the current data. It is for tests and, later,
-// snapshotting; like every other Store method it must not race with Apply.
+// Snapshot returns a copy of the current data, for tests; like every other
+// Store method it must not race with Apply. (MarshalState is the whole state,
+// including the dedup sessions, as a snapshot.)
 func (s *Store) Snapshot() map[string]string {
 	out := make(map[string]string, len(s.data))
 	for k, v := range s.data {

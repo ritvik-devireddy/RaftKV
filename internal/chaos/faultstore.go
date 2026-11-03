@@ -19,6 +19,8 @@ type faultStorage struct {
 	ops     int
 	crashAt int // crash when ops reaches this; 0 = disarmed
 	applyOp bool
+
+	snapshots int // snapshots saved, to show a run really compacted its log
 }
 
 func newFaultStorage() *faultStorage { return &faultStorage{MemoryStorage: raft.NewMemoryStorage()} }
@@ -72,5 +74,9 @@ func (s *faultStorage) SaveSnapshot(snap raft.Snapshot) error {
 		}
 		panic(errCrash)
 	}
-	return s.MemoryStorage.SaveSnapshot(snap)
+	err := s.MemoryStorage.SaveSnapshot(snap)
+	if err == nil {
+		s.snapshots++
+	}
+	return err
 }
