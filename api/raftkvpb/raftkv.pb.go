@@ -627,6 +627,7 @@ type RaftMessage struct {
 	//	*RaftMessage_AppendEntriesReply
 	//	*RaftMessage_PreVote
 	//	*RaftMessage_PreVoteReply
+	//	*RaftMessage_InstallSnapshot
 	Payload       isRaftMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -737,6 +738,15 @@ func (x *RaftMessage) GetPreVoteReply() *PreVoteResponse {
 	return nil
 }
 
+func (x *RaftMessage) GetInstallSnapshot() *InstallSnapshotRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*RaftMessage_InstallSnapshot); ok {
+			return x.InstallSnapshot
+		}
+	}
+	return nil
+}
+
 type isRaftMessage_Payload interface {
 	isRaftMessage_Payload()
 }
@@ -765,6 +775,10 @@ type RaftMessage_PreVoteReply struct {
 	PreVoteReply *PreVoteResponse `protobuf:"bytes,8,opt,name=pre_vote_reply,json=preVoteReply,proto3,oneof"`
 }
 
+type RaftMessage_InstallSnapshot struct {
+	InstallSnapshot *InstallSnapshotRequest `protobuf:"bytes,9,opt,name=install_snapshot,json=installSnapshot,proto3,oneof"`
+}
+
 func (*RaftMessage_RequestVote) isRaftMessage_Payload() {}
 
 func (*RaftMessage_RequestVoteReply) isRaftMessage_Payload() {}
@@ -776,6 +790,8 @@ func (*RaftMessage_AppendEntriesReply) isRaftMessage_Payload() {}
 func (*RaftMessage_PreVote) isRaftMessage_Payload() {}
 
 func (*RaftMessage_PreVoteReply) isRaftMessage_Payload() {}
+
+func (*RaftMessage_InstallSnapshot) isRaftMessage_Payload() {}
 
 // Receipt only. Raft replies travel as their own RaftMessage.
 type StepAck struct {
@@ -1216,6 +1232,86 @@ func (x *AppendEntriesResponse) GetLastLogIndex() uint64 {
 	return 0
 }
 
+// A leader brings a follower forward with its snapshot when the entries the
+// follower needs have been compacted away. The snapshot travels whole, in one
+// message. The follower answers with an AppendEntriesResponse: success, with
+// match_index = last_included_index.
+type InstallSnapshotRequest struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Term              uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	LeaderId          int32                  `protobuf:"varint,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	LastIncludedIndex uint64                 `protobuf:"varint,3,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"` // the snapshot replaces every log entry up to and including this one
+	LastIncludedTerm  uint64                 `protobuf:"varint,4,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`    // term of that entry
+	Data              []byte                 `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`                                                       // the state machine's state as of last_included_index; opaque to Raft
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *InstallSnapshotRequest) Reset() {
+	*x = InstallSnapshotRequest{}
+	mi := &file_api_raftkv_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstallSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstallSnapshotRequest) ProtoMessage() {}
+
+func (x *InstallSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_raftkv_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstallSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*InstallSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_api_raftkv_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *InstallSnapshotRequest) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetLeaderId() int32 {
+	if x != nil {
+		return x.LeaderId
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetLastIncludedIndex() uint64 {
+	if x != nil {
+		return x.LastIncludedIndex
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetLastIncludedTerm() uint64 {
+	if x != nil {
+		return x.LastIncludedTerm
+	}
+	return 0
+}
+
+func (x *InstallSnapshotRequest) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 var File_api_raftkv_proto protoreflect.FileDescriptor
 
 const file_api_raftkv_proto_rawDesc = "" +
@@ -1264,7 +1360,7 @@ const file_api_raftkv_proto_rawDesc = "" +
 	"\bLogEntry\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\x04R\x05index\x12\x18\n" +
-	"\acommand\x18\x03 \x01(\fR\acommand\"\xec\x03\n" +
+	"\acommand\x18\x03 \x01(\fR\acommand\"\xbc\x04\n" +
 	"\vRaftMessage\x12\x12\n" +
 	"\x04from\x18\x01 \x01(\x05R\x04from\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\x05R\x02to\x12B\n" +
@@ -1273,7 +1369,8 @@ const file_api_raftkv_proto_rawDesc = "" +
 	"\x0eappend_entries\x18\x05 \x01(\v2\x1f.raftkv.v1.AppendEntriesRequestH\x00R\rappendEntries\x12T\n" +
 	"\x14append_entries_reply\x18\x06 \x01(\v2 .raftkv.v1.AppendEntriesResponseH\x00R\x12appendEntriesReply\x126\n" +
 	"\bpre_vote\x18\a \x01(\v2\x19.raftkv.v1.PreVoteRequestH\x00R\apreVote\x12B\n" +
-	"\x0epre_vote_reply\x18\b \x01(\v2\x1a.raftkv.v1.PreVoteResponseH\x00R\fpreVoteReplyB\t\n" +
+	"\x0epre_vote_reply\x18\b \x01(\v2\x1a.raftkv.v1.PreVoteResponseH\x00R\fpreVoteReply\x12N\n" +
+	"\x10install_snapshot\x18\t \x01(\v2!.raftkv.v1.InstallSnapshotRequestH\x00R\x0finstallSnapshotB\t\n" +
 	"\apayload\"\t\n" +
 	"\aStepAck\"\x95\x01\n" +
 	"\x12RequestVoteRequest\x12\x12\n" +
@@ -1305,7 +1402,13 @@ const file_api_raftkv_proto_rawDesc = "" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x1f\n" +
 	"\vmatch_index\x18\x03 \x01(\x04R\n" +
 	"matchIndex\x12$\n" +
-	"\x0elast_log_index\x18\x04 \x01(\x04R\flastLogIndex2\xf0\x01\n" +
+	"\x0elast_log_index\x18\x04 \x01(\x04R\flastLogIndex\"\xbb\x01\n" +
+	"\x16InstallSnapshotRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\x05R\bleaderId\x12.\n" +
+	"\x13last_included_index\x18\x03 \x01(\x04R\x11lastIncludedIndex\x12,\n" +
+	"\x12last_included_term\x18\x04 \x01(\x04R\x10lastIncludedTerm\x12\x12\n" +
+	"\x04data\x18\x05 \x01(\fR\x04data2\xf0\x01\n" +
 	"\x02KV\x124\n" +
 	"\x03Get\x12\x15.raftkv.v1.GetRequest\x1a\x16.raftkv.v1.GetResponse\x124\n" +
 	"\x03Put\x12\x15.raftkv.v1.PutRequest\x1a\x16.raftkv.v1.PutResponse\x12=\n" +
@@ -1326,26 +1429,27 @@ func file_api_raftkv_proto_rawDescGZIP() []byte {
 	return file_api_raftkv_proto_rawDescData
 }
 
-var file_api_raftkv_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_api_raftkv_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_api_raftkv_proto_goTypes = []any{
-	(*RedirectInfo)(nil),          // 0: raftkv.v1.RedirectInfo
-	(*GetRequest)(nil),            // 1: raftkv.v1.GetRequest
-	(*GetResponse)(nil),           // 2: raftkv.v1.GetResponse
-	(*PutRequest)(nil),            // 3: raftkv.v1.PutRequest
-	(*PutResponse)(nil),           // 4: raftkv.v1.PutResponse
-	(*DeleteRequest)(nil),         // 5: raftkv.v1.DeleteRequest
-	(*DeleteResponse)(nil),        // 6: raftkv.v1.DeleteResponse
-	(*CASRequest)(nil),            // 7: raftkv.v1.CASRequest
-	(*CASResponse)(nil),           // 8: raftkv.v1.CASResponse
-	(*LogEntry)(nil),              // 9: raftkv.v1.LogEntry
-	(*RaftMessage)(nil),           // 10: raftkv.v1.RaftMessage
-	(*StepAck)(nil),               // 11: raftkv.v1.StepAck
-	(*RequestVoteRequest)(nil),    // 12: raftkv.v1.RequestVoteRequest
-	(*RequestVoteResponse)(nil),   // 13: raftkv.v1.RequestVoteResponse
-	(*PreVoteRequest)(nil),        // 14: raftkv.v1.PreVoteRequest
-	(*PreVoteResponse)(nil),       // 15: raftkv.v1.PreVoteResponse
-	(*AppendEntriesRequest)(nil),  // 16: raftkv.v1.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil), // 17: raftkv.v1.AppendEntriesResponse
+	(*RedirectInfo)(nil),           // 0: raftkv.v1.RedirectInfo
+	(*GetRequest)(nil),             // 1: raftkv.v1.GetRequest
+	(*GetResponse)(nil),            // 2: raftkv.v1.GetResponse
+	(*PutRequest)(nil),             // 3: raftkv.v1.PutRequest
+	(*PutResponse)(nil),            // 4: raftkv.v1.PutResponse
+	(*DeleteRequest)(nil),          // 5: raftkv.v1.DeleteRequest
+	(*DeleteResponse)(nil),         // 6: raftkv.v1.DeleteResponse
+	(*CASRequest)(nil),             // 7: raftkv.v1.CASRequest
+	(*CASResponse)(nil),            // 8: raftkv.v1.CASResponse
+	(*LogEntry)(nil),               // 9: raftkv.v1.LogEntry
+	(*RaftMessage)(nil),            // 10: raftkv.v1.RaftMessage
+	(*StepAck)(nil),                // 11: raftkv.v1.StepAck
+	(*RequestVoteRequest)(nil),     // 12: raftkv.v1.RequestVoteRequest
+	(*RequestVoteResponse)(nil),    // 13: raftkv.v1.RequestVoteResponse
+	(*PreVoteRequest)(nil),         // 14: raftkv.v1.PreVoteRequest
+	(*PreVoteResponse)(nil),        // 15: raftkv.v1.PreVoteResponse
+	(*AppendEntriesRequest)(nil),   // 16: raftkv.v1.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil),  // 17: raftkv.v1.AppendEntriesResponse
+	(*InstallSnapshotRequest)(nil), // 18: raftkv.v1.InstallSnapshotRequest
 }
 var file_api_raftkv_proto_depIdxs = []int32{
 	0,  // 0: raftkv.v1.GetResponse.redirect:type_name -> raftkv.v1.RedirectInfo
@@ -1358,22 +1462,23 @@ var file_api_raftkv_proto_depIdxs = []int32{
 	17, // 7: raftkv.v1.RaftMessage.append_entries_reply:type_name -> raftkv.v1.AppendEntriesResponse
 	14, // 8: raftkv.v1.RaftMessage.pre_vote:type_name -> raftkv.v1.PreVoteRequest
 	15, // 9: raftkv.v1.RaftMessage.pre_vote_reply:type_name -> raftkv.v1.PreVoteResponse
-	9,  // 10: raftkv.v1.AppendEntriesRequest.entries:type_name -> raftkv.v1.LogEntry
-	1,  // 11: raftkv.v1.KV.Get:input_type -> raftkv.v1.GetRequest
-	3,  // 12: raftkv.v1.KV.Put:input_type -> raftkv.v1.PutRequest
-	5,  // 13: raftkv.v1.KV.Delete:input_type -> raftkv.v1.DeleteRequest
-	7,  // 14: raftkv.v1.KV.CompareAndSwap:input_type -> raftkv.v1.CASRequest
-	10, // 15: raftkv.v1.Raft.Step:input_type -> raftkv.v1.RaftMessage
-	2,  // 16: raftkv.v1.KV.Get:output_type -> raftkv.v1.GetResponse
-	4,  // 17: raftkv.v1.KV.Put:output_type -> raftkv.v1.PutResponse
-	6,  // 18: raftkv.v1.KV.Delete:output_type -> raftkv.v1.DeleteResponse
-	8,  // 19: raftkv.v1.KV.CompareAndSwap:output_type -> raftkv.v1.CASResponse
-	11, // 20: raftkv.v1.Raft.Step:output_type -> raftkv.v1.StepAck
-	16, // [16:21] is the sub-list for method output_type
-	11, // [11:16] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	18, // 10: raftkv.v1.RaftMessage.install_snapshot:type_name -> raftkv.v1.InstallSnapshotRequest
+	9,  // 11: raftkv.v1.AppendEntriesRequest.entries:type_name -> raftkv.v1.LogEntry
+	1,  // 12: raftkv.v1.KV.Get:input_type -> raftkv.v1.GetRequest
+	3,  // 13: raftkv.v1.KV.Put:input_type -> raftkv.v1.PutRequest
+	5,  // 14: raftkv.v1.KV.Delete:input_type -> raftkv.v1.DeleteRequest
+	7,  // 15: raftkv.v1.KV.CompareAndSwap:input_type -> raftkv.v1.CASRequest
+	10, // 16: raftkv.v1.Raft.Step:input_type -> raftkv.v1.RaftMessage
+	2,  // 17: raftkv.v1.KV.Get:output_type -> raftkv.v1.GetResponse
+	4,  // 18: raftkv.v1.KV.Put:output_type -> raftkv.v1.PutResponse
+	6,  // 19: raftkv.v1.KV.Delete:output_type -> raftkv.v1.DeleteResponse
+	8,  // 20: raftkv.v1.KV.CompareAndSwap:output_type -> raftkv.v1.CASResponse
+	11, // 21: raftkv.v1.Raft.Step:output_type -> raftkv.v1.StepAck
+	17, // [17:22] is the sub-list for method output_type
+	12, // [12:17] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_api_raftkv_proto_init() }
@@ -1388,6 +1493,7 @@ func file_api_raftkv_proto_init() {
 		(*RaftMessage_AppendEntriesReply)(nil),
 		(*RaftMessage_PreVote)(nil),
 		(*RaftMessage_PreVoteReply)(nil),
+		(*RaftMessage_InstallSnapshot)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1395,7 +1501,7 @@ func file_api_raftkv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_raftkv_proto_rawDesc), len(file_api_raftkv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
