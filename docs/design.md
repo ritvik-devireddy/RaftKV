@@ -158,7 +158,13 @@ Add a row for every bug, with the seed that reproduces it and the regression tes
 
 ## Benchmarks
 
-TODO: throughput and p50/p99 latency for 1, 3, and 5 nodes; time to elect a new leader after the old one is killed. State the hardware, the workload, and what bounded each number.
+Code is in `bench/` (run with `go run ./bench`) and `internal/benchstat` (percentiles, tested).
+
+- **What it runs.** Real `raftkv-server` processes on localhost, one real gRPC connection per client, and a real fsynced WAL in a temporary directory (or `-dir`). Nothing is simulated, because a simulated network or disk would make latency meaningless. The tradeoff is that nothing is controlled either: the numbers depend on the machine, the drive, antivirus, and whatever else is running.
+- **Throughput and latency.** `k` clients each keep one request in flight (the protocol allows one per client) and write random keys from a fixed key space for a measured window after an unmeasured warm-up. Latency is measured per operation at the client; percentiles use the nearest-rank method. Reads go through the log (that is how reads stay linearizable), so `-read-pct` mostly shows the same cost as writes. Throughput is operations that started in the window divided by its length.
+- **What bounds the numbers.** With fsync on, a write needs the leader to fsync its log and a majority of followers to fsync theirs before it commits, and on one machine that is all one drive. Batching helps: many clients share each fsync, so throughput rises with client count until the drive or the single node loop saturates. `-no-sync` shows how much of the latency is fsync; it is unsafe and is reported separately, never as the headline.
+- **Failover time.** The tool kills the leader process (an abrupt kill, like a crash) and polls with short-lived clients until a write succeeds again. That is client-visible unavailability: roughly the remaining election timeout, plus a PreVote round and a vote round, plus the new leader committing its first entry. The configured election timeout (default 10 to 20 ticks of 100 ms, so 1 to 2 s) dominates it, so the tool prints it next to the result; a shorter timeout trades faster failover for more spurious elections. Resolution is about 0.1 s. The killed node is restarted between trials.
+- **Not measured.** Network latency between machines, cross-machine clock or disk differences, large values, and behaviour with a large state (snapshots copy the whole state under the node lock).
 
 ## Open questions
 

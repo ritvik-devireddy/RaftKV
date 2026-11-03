@@ -84,7 +84,7 @@ flowchart TB
 - Persist-before-reply: terms, votes and log entries reach disk before any message that depends on them leaves the node
 - Exactly-once writes: every request carries `(ClientID, Seq)`, and the replicated state machine deduplicates retries
 - Reads go through the log, so they are linearizable
-- **Snapshots and log compaction:** after every N applied entries (`-snapshot-every`, off by default) a node snapshots the state machine, including the dedup table, and drops the covered log prefix. A follower that has fallen behind the compacted prefix is brought forward with InstallSnapshot
+- **Snapshots and log compaction:** after every N applied entries (`-snapshot-every`, default 1000, 0 turns it off) a node snapshots the state machine, including the dedup table, and drops the covered log prefix. A follower that has fallen behind the compacted prefix is brought forward with InstallSnapshot
 - gRPC API with a leader-finding client that follows redirects, a CLI, and a Docker Compose setup
 
 ## Run it
@@ -124,7 +124,7 @@ go run ./cmd/raftkv-cli cas hello world there
 go run ./cmd/raftkv-cli delete hello
 ```
 
-To exercise compaction, add `-snapshot-every 100` to each node.
+Nodes snapshot every 1,000 applied entries by default; add `-snapshot-every 100` to see compaction sooner.
 
 Stop the leader with Ctrl+C: the other two elect a new one and reads and writes continue. Restart it and it recovers its term and log from its write-ahead log and catches up. Or run `docker compose up --build` for the same three nodes in containers.
 
@@ -144,6 +144,14 @@ $env:RAFTKV_CHAOS_SEEDS=2000; go test ./test/linearizability -run TestLinearizab
 
 If a seed ever fails, the test prints the exact command that replays it and writes an HTML visualization of the failing history.
 
+### Benchmarks
+
+```
+go run ./bench
+```
+
+This builds the server, starts real `raftkv-server` processes on your machine (1, 3 and 5 nodes, real gRPC, real fsynced WAL), runs concurrent clients against them, and prints Markdown tables: throughput and p50/p95/p99/max latency per cluster size and client count, and how long writes stay unavailable after the leader process is killed. Useful flags: `-sizes`, `-clients`, `-duration`, `-read-pct`, `-value-size`, `-trials`, `-dir` (put the data on the drive you want to measure), and `-no-sync` (fsync off, unsafe, only to see what fsync costs). Everything runs on one machine, so the numbers measure the software and the local disk, not a network; see [`docs/design.md`](docs/design.md) for what each number does and does not mean. Results are not published here yet.
+
 ### Regenerating the protobuf code
 
 Only needed after editing `api/raftkv.proto`. Install `protoc` (`winget install protobuf`) and the two plugins (`go install google.golang.org/protobuf/cmd/protoc-gen-go@latest` and `go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest`), then run `scripts/gen-proto.ps1` (or `.sh`). The generated code in `api/raftkvpb` is committed.
@@ -162,6 +170,8 @@ internal/simnet/         deterministic simulated network
 internal/storage/        write-ahead log
 internal/kv/             key-value state machine with request deduplication
 internal/chaos/          simulated cluster and clients with fault injection
+internal/benchstat/      percentile and summary helpers for the benchmark
+bench/                   benchmark tool (real processes, real gRPC)
 test/linearizability/    Porcupine model and seeded chaos tests
 scripts/                 protobuf generation, local demo cluster
 docs/design.md           design decisions, tradeoffs, bugs found
@@ -173,7 +183,7 @@ Stated plainly, because they are the first things a reviewer should ask about:
 
 - **Snapshots are sent whole.** There is no chunking, so a snapshot must fit in one gRPC message (80 MiB limit; the WAL refuses larger ones with `ErrTooLarge`). Taking a snapshot copies the whole state under the node lock, so a very large state stalls the node while it happens.
 - Compaction keeps no trailing entries, so a follower that is even slightly behind the snapshot gets the whole snapshot instead of a few entries.
-- Snapshots are off unless `-snapshot-every` is set. The WAL compacts by rewriting the file and renaming it; on Windows the rename's durability is not verified.
+- The WAL compacts by rewriting the file and renaming it; on Windows the rename's durability is not verified.
 - **Reads go through the log.** Simple and linearizable, but slower than a leased or ReadIndex read.
 - **Static membership.** Nodes cannot be added or removed at runtime.
 - **No TLS or authentication.**

@@ -55,6 +55,15 @@ func New(addrs []string) (*Client, error) {
 	}, nil
 }
 
+// LastServer returns the address of the node the client is currently talking
+// to. After a successful operation that is the node that served it, which is
+// the leader. Call it between operations, not during one.
+func (c *Client) LastServer() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addrs[c.next%len(c.addrs)]
+}
+
 // Close releases all connections.
 func (c *Client) Close() {
 	c.mu.Lock()

@@ -67,7 +67,8 @@ README.md                       restructured around a "what has been verified" t
 CLAUDE.md                       working notes Claude sessions read automatically (commands, invariants, how to work)
 api/raftkv.proto                gRPC/protobuf definitions
 api/raftkvpb/                   GENERATED (raftkv.pb.go, raftkv_grpc.pb.go); exists only on his machine/repo, regenerate with scripts/gen-proto.ps1
-bench/doc.go                    stub for Phase 6 benchmarks
+bench/main.go                   benchmark tool: starts real raftkv-server processes, measures throughput, p50/p95/p99, failover time
+internal/benchstat/              percentiles, summaries, int-list flag parsing (unit tested)
 cmd/raftkv-server/main.go       server binary
 cmd/raftkv-cli/main.go          CLI client
 docs/design.md                  design notes (Durability, Server layer, Linearizability checking, testing strategy, bugs table, open questions)
@@ -241,7 +242,7 @@ Lease reads / ReadIndex (deferred), membership changes (non-goal), TLS (non-goal
 ### Known issues and limitations
 - **PreVote is implemented** (section 5, Phase 6a); the disruption seen in the demo is fixed.
 - **No CheckQuorum:** a leader that loses contact with a majority keeps believing it is the leader (safe, because it cannot commit, but clients to it hang until timeout). Planned.
-- Snapshots are whole (no chunking), taken under the node lock (large state stalls the node), keep no trailing entries, and are off unless `-snapshot-every` is set. The `kv` sessions map still grows with distinct clients and is included in every snapshot. WAL compaction renames a file; rename durability on Windows is unverified. Two mutants (snapshot without sessions, tail kept without a term check) are caught by unit tests but not by the chaos check.
+- Snapshots are whole (no chunking), taken under the node lock (large state stalls the node), keep no trailing entries, and `-snapshot-every` defaults to 1000 (0 disables). The `kv` sessions map still grows with distinct clients and is included in every snapshot. WAL compaction renames a file; rename durability on Windows is unverified. Two mutants (snapshot without sessions, tail kept without a term check) are caught by unit tests but not by the chaos check.
 - Reads go through the log (slow).
 - Static membership. Insecure gRPC.
 - WAL length-field corner case (section 5).

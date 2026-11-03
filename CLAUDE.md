@@ -14,6 +14,7 @@ go test -race -count=1 ./...    # the full bar; raft package takes about 45 to 1
 go test ./test/linearizability -v          # 200 seeded chaos runs
 RAFTKV_CHAOS_SEEDS=2000 go test ./test/linearizability -run TestLinearizableUnderChaos -timeout 1h
 RAFTKV_CHAOS_FIRST_SEED=<n> RAFTKV_CHAOS_SEEDS=1 go test ./test/linearizability -run TestLinearizableUnderChaos -v   # replay one seed
+go run ./bench                  # benchmark: real processes, real gRPC, real fsync; prints Markdown tables
 scripts/gen-proto.sh            # only after editing api/raftkv.proto; needs protoc, protoc-gen-go, protoc-gen-go-grpc
 ```
 
