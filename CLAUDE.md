@@ -50,7 +50,7 @@ Concise and plain. Explain design choices briefly, because he needs to explain t
 
 ## Roadmap (see `docs/HANDOFF.md` section 11 for detail)
 
-1. Benchmarks (throughput, p50/p99 latency, time to elect after a leader dies; state hardware and caveats).
+1. Group commit: batch concurrent proposals into one fsync and one AppendEntries. Profile and repeat `go run ./bench` first; the first benchmark showed throughput does not grow with clients.
 2. CheckQuorum, a chaos replay visualizer, README demo GIF.
 
-Done: snapshots and log compaction (see `docs/design.md`).
+Done: snapshots and log compaction, benchmarks (see `docs/design.md` and the README).

@@ -150,7 +150,29 @@ If a seed ever fails, the test prints the exact command that replays it and writ
 go run ./bench
 ```
 
-This builds the server, starts real `raftkv-server` processes on your machine (1, 3 and 5 nodes, real gRPC, real fsynced WAL), runs concurrent clients against them, and prints Markdown tables: throughput and p50/p95/p99/max latency per cluster size and client count, and how long writes stay unavailable after the leader process is killed. Useful flags: `-sizes`, `-clients`, `-duration`, `-read-pct`, `-value-size`, `-trials`, `-dir` (put the data on the drive you want to measure), and `-no-sync` (fsync off, unsafe, only to see what fsync costs). Everything runs on one machine, so the numbers measure the software and the local disk, not a network; see [`docs/design.md`](docs/design.md) for what each number does and does not mean. Results are not published here yet.
+This builds the server, starts real `raftkv-server` processes on your machine (1, 3 and 5 nodes, real gRPC, real fsynced WAL), runs concurrent clients against them, and prints Markdown tables: throughput and p50/p95/p99/max latency per cluster size and client count, and how long writes stay unavailable after the leader process is killed. Useful flags: `-sizes`, `-clients`, `-duration`, `-read-pct`, `-value-size`, `-trials`, `-dir` (put the data on the drive you want to measure), and `-no-sync` (fsync off, unsafe, only to see what fsync costs). Everything runs on one machine, so the numbers measure the software and the local disk, not a network; see [`docs/design.md`](docs/design.md) for what each number does and does not mean.
+
+**Results** (one run each, 2026-11-02: Windows 11, 20 logical CPUs, data on the system drive, fsync on, 128-byte values, 1,000 keys, snapshots every 1,000 entries, 2 s warm-up then 10 s measured, all nodes and clients on the same machine):
+
+| Nodes | Clients | ops/s | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |
+|---|---|---|---|---|---|---|
+| 1 | 1 | 1106 | 0.85 | 1.19 | 1.45 | 44.84 |
+| 1 | 16 | 1126 | 13.58 | 14.66 | 48.54 | 54.00 |
+| 1 | 64 | 1084 | 54.53 | 84.72 | 94.30 | 421.85 |
+| 3 | 1 | 373 | 2.62 | 3.66 | 4.17 | 92.01 |
+| 3 | 16 | 241 | 63.90 | 81.90 | 99.23 | 118.89 |
+| 3 | 64 | 423 | 148.26 | 185.47 | 202.71 | 213.38 |
+| 5 | 1 | 249 | 4.16 | 4.76 | 5.30 | 87.14 |
+| 5 | 16 | 186 | 84.80 | 91.87 | 141.91 | 176.00 |
+| 5 | 64 | 287 | 223.11 | 283.85 | 316.09 | 322.79 |
+
+After the leader process is killed, writes succeed again after a median of 1.38 s (3 nodes, 5 kills, range 1.27 to 1.85 s) and 1.29 s (5 nodes, range 1.28 to 2.13 s). The election timeout was 1 to 2 s, so this is what it should be.
+
+What the numbers say, and what they do not:
+
+- **Write throughput does not grow with more clients.** One node does about 1,100 writes/s with 1, 16 or 64 clients; only latency rises, in proportion to the number of clients. A single client's 0.85 ms median is about one fsync. This is consistent with every write paying for its own fsync: there is no group commit, so concurrent writes queue instead of sharing a sync. Batching is the obvious next improvement.
+- **Replication is much slower than one node.** Three nodes do 373 writes/s with one client and 5 nodes 249. With 16 clients the 3-node and 5-node runs got slower than with one client, which I have not explained (the run was not repeated, so run-to-run noise is unmeasured, and I have not profiled it).
+- These are single runs on one machine, with the nodes sharing one drive and one CPU, so they are good for orders of magnitude and for comparing before and after a change, not as absolute figures.
 
 ### Regenerating the protobuf code
 
@@ -184,6 +206,7 @@ Stated plainly, because they are the first things a reviewer should ask about:
 - **Snapshots are sent whole.** There is no chunking, so a snapshot must fit in one gRPC message (80 MiB limit; the WAL refuses larger ones with `ErrTooLarge`). Taking a snapshot copies the whole state under the node lock, so a very large state stalls the node while it happens.
 - Compaction keeps no trailing entries, so a follower that is even slightly behind the snapshot gets the whole snapshot instead of a few entries.
 - The WAL compacts by rewriting the file and renaming it; on Windows the rename's durability is not verified.
+- **No write batching.** Every write is fsynced separately, so write throughput is bounded by fsync latency and does not rise with more clients (see Benchmarks).
 - **Reads go through the log.** Simple and linearizable, but slower than a leased or ReadIndex read.
 - **Static membership.** Nodes cannot be added or removed at runtime.
 - **No TLS or authentication.**
@@ -197,7 +220,8 @@ Stated plainly, because they are the first things a reviewer should ask about:
 - [x] Linearizability checking with Porcupine, with the checker validated by breaking the system on purpose
 - [x] PreVote
 - [x] Snapshots and log compaction
-- [ ] Benchmarks: throughput, p50/p99 latency, time to elect after a leader dies
+- [x] Benchmarks: throughput, p50/p99 latency, time to elect after a leader dies
+- [ ] Group commit: share one fsync and one replication message between concurrent writes (benchmarks show throughput does not grow with clients)
 - [ ] CheckQuorum: a leader that loses contact with a majority steps down
 - [ ] Chaos replay visualizer
 
