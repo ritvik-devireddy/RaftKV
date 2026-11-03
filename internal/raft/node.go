@@ -18,8 +18,10 @@ const maxEntriesPerMessage = 64
 //	Phase 2: log replication (AppendEntries, commit index, Apply)       <- done
 //	Phase 3: durable storage behind the Storage interface (WAL) -- done
 //
-// Log indexes are contiguous and start at 1, so the entry with index i is
-// log[i-1]. (Snapshots, which would change that, come later.)
+// Log indexes are contiguous and start at 1. Once a prefix of the log has been
+// compacted into a snapshot, log holds only the entries after it: the entry
+// with index i is log[i-snap.Index-1]. Use entryAt, termAt and lastLog rather
+// than indexing log directly.
 //
 // All methods are safe for concurrent use. Transport.Send and Config.Apply
 // are called while the node's lock is held, so neither may block or call back
@@ -34,7 +36,8 @@ type Node struct {
 	// Persistent state (restored from Storage on start).
 	currentTerm Term
 	votedFor    NodeID
-	log         []LogEntry
+	log         []LogEntry // entries after the snapshot
+	snap        Snapshot   // the compacted prefix of the log (Index 0 = none)
 
 	// Volatile state.
 	role        Role
@@ -93,8 +96,8 @@ func NewNode(cfg Config, storage Storage, transport Transport) (*Node, error) {
 	}
 
 	for i, e := range ps.Log {
-		if e.Index != Index(i+1) {
-			return nil, fmt.Errorf("raft: stored log is not contiguous: position %d holds index %d", i+1, e.Index)
+		if want := ps.Snapshot.Index + Index(i) + 1; e.Index != want {
+			return nil, fmt.Errorf("raft: stored log is not contiguous: position %d holds index %d, want %d", i+1, e.Index, want)
 		}
 	}
 
@@ -106,6 +109,9 @@ func NewNode(cfg Config, storage Storage, transport Transport) (*Node, error) {
 		currentTerm: ps.CurrentTerm,
 		votedFor:    ps.VotedFor,
 		log:         ps.Log,
+		snap:        ps.Snapshot,
+		commitIndex: ps.Snapshot.Index, // a snapshot only ever holds committed, applied state
+		lastApplied: ps.Snapshot.Index,
 		role:        Follower,
 		leaderID:    NoLeader,
 	}
@@ -425,7 +431,7 @@ func (n *Node) sendAppendEntries(peer NodeID) {
 		end := min(last, next+maxEntriesPerMessage-1)
 		// Copy: in tests, nodes share memory, and a follower truncating its log
 		// must never be able to modify ours.
-		entries = append([]LogEntry(nil), n.log[next-1:end]...)
+		entries = append([]LogEntry(nil), n.log[next-n.snap.Index-1:end-n.snap.Index]...)
 	}
 
 	n.send(peer, AppendEntriesArgs{
@@ -546,8 +552,8 @@ func (n *Node) handleAppendEntries(from NodeID, args AppendEntriesArgs) {
 	truncateAt := Index(0) // 0 means no truncation
 	for i, e := range args.Entries {
 		idx := args.PrevLogIndex + 1 + Index(i)
-		if idx <= Index(len(n.log)) {
-			if n.log[idx-1].Term == e.Term {
+		if idx <= lastIndex {
+			if n.termAt(idx) == e.Term {
 				continue
 			}
 			truncateAt = idx // conflict: drop this entry and everything after it
@@ -559,7 +565,7 @@ func (n *Node) handleAppendEntries(from NodeID, args AppendEntriesArgs) {
 		// Storage first, then memory: the log reaches stable storage before we
 		// acknowledge it.
 		n.must(n.storage.TruncateFrom(truncateAt), "truncate log")
-		n.log = n.log[:truncateAt-1]
+		n.log = n.log[:truncateAt-n.snap.Index-1]
 	}
 	if len(toAppend) > 0 {
 		n.must(n.storage.Append(toAppend), "append entries")
@@ -588,7 +594,7 @@ func (n *Node) applyCommitted() {
 	for n.lastApplied < n.commitIndex {
 		n.lastApplied++
 		if n.cfg.Apply != nil {
-			n.cfg.Apply(n.log[n.lastApplied-1])
+			n.cfg.Apply(n.entryAt(n.lastApplied))
 		}
 	}
 }
@@ -607,21 +613,35 @@ func (n *Node) appendLocal(command []byte) LogEntry {
 	return e
 }
 
+// lastLog returns the index and term of the last entry, which is the snapshot's
+// last entry when nothing follows it.
 func (n *Node) lastLog() (Index, Term) {
 	if len(n.log) == 0 {
-		return 0, 0
+		return n.snap.Index, n.snap.Term
 	}
 	last := n.log[len(n.log)-1]
 	return last.Index, last.Term
 }
 
-// termAt returns the term of the entry at index, or 0 for index 0 or an index
-// past the end of the log.
+// entryAt returns the entry at index, which must be in the log (after the
+// snapshot and no later than the last entry).
+func (n *Node) entryAt(index Index) LogEntry {
+	return n.log[index-n.snap.Index-1]
+}
+
+// termAt returns the term of the entry at index. It knows the term of the
+// snapshot's last entry; for index 0, an index inside the compacted prefix, or
+// an index past the end of the log it returns 0 (unknown).
 func (n *Node) termAt(index Index) Term {
-	if index == 0 || index > Index(len(n.log)) {
+	last, _ := n.lastLog()
+	switch {
+	case index == 0 || index < n.snap.Index || index > last:
 		return 0
+	case index == n.snap.Index:
+		return n.snap.Term
+	default:
+		return n.entryAt(index).Term
 	}
-	return n.log[index-1].Term
 }
 
 func (n *Node) resetElectionTimer() {

@@ -56,6 +56,16 @@ type LogEntry struct {
 	Command []byte
 }
 
+// Snapshot is a compacted prefix of the log: the state machine's state after
+// applying every entry up to and including Index, and the term of that entry.
+// Index 0 means "no snapshot". Data is opaque to Raft; the state machine
+// produces it and consumes it.
+type Snapshot struct {
+	Index Index
+	Term  Term
+	Data  []byte
+}
+
 // IsNoOp reports whether the entry carries no client command. A new leader
 // appends one no-op entry at the start of its term: committing it commits
 // every earlier entry too, which a leader may not do by counting replicas

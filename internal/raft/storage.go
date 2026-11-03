@@ -7,9 +7,14 @@ import (
 
 // PersistentState is what Raft must write to stable storage before replying
 // to any RPC (Figure 2, "Persistent state on all servers").
+//
+// The log does not have to start at index 1. Entries up to Snapshot.Index have
+// been compacted into the snapshot, so Log holds the entries from
+// Snapshot.Index+1 on: Log[i] has index Snapshot.Index+1+i.
 type PersistentState struct {
 	CurrentTerm Term
 	VotedFor    NodeID
+	Snapshot    Snapshot
 	Log         []LogEntry
 }
 
@@ -67,7 +72,7 @@ func (m *MemoryStorage) SaveHardState(term Term, votedFor NodeID) error {
 func (m *MemoryStorage) Append(entries []LogEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	next := Index(len(m.state.Log)) + 1
+	next := m.state.Snapshot.Index + Index(len(m.state.Log)) + 1
 	for i, e := range entries {
 		if e.Index != next+Index(i) {
 			return fmt.Errorf("append: entry index %d, want %d", e.Index, next+Index(i))
@@ -80,10 +85,11 @@ func (m *MemoryStorage) Append(entries []LogEntry) error {
 func (m *MemoryStorage) TruncateFrom(index Index) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if index < 1 || int(index) > len(m.state.Log) {
-		return fmt.Errorf("truncate: index %d outside log of length %d", index, len(m.state.Log))
+	base := m.state.Snapshot.Index
+	if index <= base || index > base+Index(len(m.state.Log)) {
+		return fmt.Errorf("truncate: index %d outside the log (%d, %d]", index, base, base+Index(len(m.state.Log)))
 	}
-	m.state.Log = m.state.Log[:index-1]
+	m.state.Log = m.state.Log[:index-base-1]
 	return nil
 }
 
