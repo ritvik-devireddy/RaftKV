@@ -128,7 +128,7 @@ scripts/demo.ps1                starts a local 3-node cluster in 3 windows (-Fre
 `New(Config{MinDelay, MaxDelay, DropRate, Seed, ...})`, `Register(id, Handler)`, `Send`, `Partition(groups ...[]int)`, `Heal`, `SetDropRate`, `Step`, `RunUntil`, `Now`, `Stats`. Virtual clock plus event heap; same seed gives the same schedule.
 
 ### internal/kv
-`Command{Op, Key, Value, Expected, ClientID, Seq}`, `Op` = OpGet/OpPut/OpDelete/OpCAS, `Result{Value, OK}`, `Store` with `Apply(cmd) Result`, `Snapshot() map[string]string` (data only, not sessions). Encoding never produces an empty slice (empty means no-op in Raft).
+`Command{Op, Key, Value, Expected, ClientID, Seq}`, `Op` = OpGet/OpPut/OpDelete/OpCAS, `Result{Value, OK}`, `Store` with `Apply(cmd) Result`, `Snapshot() map[string]string` (data only, for tests) and `MarshalState`/`UnmarshalState` (data and dedup sessions, deterministic encoding, used for Raft snapshots). Encoding never produces an empty slice (empty means no-op in Raft).
 
 ### internal/server
 `New(cfg, storage, transport) (*Server, error)`, `Submit`, `Execute`, `Step`, `Tick`, `Status`, `Run(ctx, interval)`, `Data()`. `Pending{Done(), Result()}`, `NotLeaderError{Leader}`, `ErrLostLeadership`.
@@ -224,7 +224,8 @@ Lease reads / ReadIndex (deferred), membership changes (non-goal), TLS (non-goal
 - **Last full run on Ritvik's machine** (after PreVote; `scripts\gen-proto.ps1`, `go mod tidy`, `gofmt -l .` empty, `go vet ./...` clean, `go test -race -count=1 ./...`): all `ok`. chaos 2.7s, kv 1.5s, raft 50.2s, rpc 2.5s, server 1.8s, simnet 1.3s, storage 7.5s, test/linearizability 77.1s. `api/raftkvpb`, `bench`, `cmd/*`, `internal/client` have no test files.
 - **2,000-seed soak, real Porcupine v1.3.1, run before PreVote:** 1,136,423 operations (1,100,790 with a known outcome), all linearizable, 12.4 s. After PreVote: 200 seeds with real Porcupine as part of the suite, and 2,000 seeds (1,172,250 operations) with Claude's stand-in checker in its container. The README's "2,000 seeds, about 1.1 million operations" is from the pre-PreVote real run; the nightly soak is meant to cover the rest.
 - **Pending or unverified:** GitHub Actions status on the latest commits; whether the README and `docs/design.md` changes, `soak.yml`, `scripts/demo.ps1` and `CLAUDE.md` were committed and pushed; the first run of the soak workflow (start it by hand from the Actions tab); whether the mermaid diagrams render on GitHub; `scripts/demo.ps1` (never run); `docker compose up --build` (never run).
-- **Incomplete:** snapshots and log compaction, benchmarks, CheckQuorum, visualizer, demo GIF.
+- **Snapshots and log compaction:** implemented in a scratch repo and handed over as a patch series; passes gofmt, vet and `go test -race` for raft (about 142 s), chaos, kv, server, storage, simnet and linearizability (with Claude's stand-in checker). **Not run by Claude:** `internal/rpc`, `cmd/*` (no gRPC or protoc available), real Porcupine, `api/raftkvpb` regeneration, Windows behaviour. Ritvik must regenerate the protobuf code and run the full bar.
+- **Incomplete:** benchmarks, CheckQuorum, visualizer, demo GIF.
 - **Broken:** nothing known.
 
 ## 8. Tests, Bugs, and Known Issues
@@ -240,7 +241,7 @@ Lease reads / ReadIndex (deferred), membership changes (non-goal), TLS (non-goal
 ### Known issues and limitations
 - **PreVote is implemented** (section 5, Phase 6a); the disruption seen in the demo is fixed.
 - **No CheckQuorum:** a leader that loses contact with a majority keeps believing it is the leader (safe, because it cannot commit, but clients to it hang until timeout). Planned.
-- No snapshots or log compaction: the log grows without bound, restart replays the whole log, and the `kv` sessions map grows without bound (`TODO(snapshots)` in `store.go`).
+- Snapshots are whole (no chunking), taken under the node lock (large state stalls the node), keep no trailing entries, and are off unless `-snapshot-every` is set. The `kv` sessions map still grows with distinct clients and is included in every snapshot. WAL compaction renames a file; rename durability on Windows is unverified. Two mutants (snapshot without sessions, tail kept without a term check) are caught by unit tests but not by the chaos check.
 - Reads go through the log (slow).
 - Static membership. Insecure gRPC.
 - WAL length-field corner case (section 5).
@@ -286,7 +287,7 @@ Do not expand the scope beyond this. Done so far: Phases 0 to 5, PreVote, README
 
 ### Immediate (in this order)
 1. **Confirm the repo state.** `git status`, `git log --oneline`, CI on the latest commit, the first manual run of the Soak workflow, that the README diagrams render, that `scripts\demo.ps1` works. If it does, Ritvik records a short GIF (kill the leader, writes keep working) to `docs/assets/demo.gif` and Claude links it from the README.
-2. **Snapshots and log compaction** (about 2 days, the riskiest piece). **The design below was proposed to Ritvik and not yet approved; ask for a go-ahead before coding.**
+2. **Snapshots and log compaction: DONE** (see `docs/design.md`, "Snapshots and log compaction"). The plan below is kept as the record of what was agreed.
    - *Index offset:* the node tracks `snapshotIndex` and `snapshotTerm`; `log[i]` holds index `snapshotIndex+1+i`. Today `log[i-1]` is index `i` is assumed in `termAt`, `lastLog`, `sendAppendEntries`, `handleAppendEntries`, `advanceCommit` and the contiguity check in `NewNode`.
    - *Who snapshots:* the server owns the state machine, so after N applied entries (default 1,000) it calls `Node.Compact(index, data)`; the node only compacts up to `lastApplied`.
    - *Contents:* KV data AND dedup sessions (leaving sessions out breaks exactly-once after a restore; the chaos test should catch it).
@@ -307,13 +308,13 @@ ReadIndex or lease reads, TLS, session expiry, a `node.go`/WAL interview walkthr
 - Phase 5 and PreVote are complete and pushed; the full suite passed on Ritvik's machine after PreVote.
 - Claude then restructured the README, added architecture diagrams to `docs/design.md`, wrote `soak.yml`, `scripts/demo.ps1` and `CLAUDE.md`, and refreshed this handoff. Ritvik was given paste-able commit blocks; whether he ran them is unknown (see section 7).
 - Ritvik asked how to let Claude run tests and push from his phone; the answer was Claude Code cloud sessions plus the Claude GitHub App (section 9). Not yet confirmed set up.
-- The snapshot design was sent for approval; he has not said go. Last question asked of him: start snapshots, or do the benchmarks/diagram/demo first.
+- Ritvik said to go ahead with snapshots. They were built as five commits in a scratch repo (index-offset refactor, storage and WAL, node compaction and InstallSnapshot, gRPC, KV/server/chaos wiring) plus docs, delivered as a `git am` patch series. Next after he has merged and run them: benchmarks.
 
 ## 13. Immediate Next Implementation Steps
 
 1. Check `git status`, `git log --oneline`, and CI/Actions on the latest commit; ask Ritvik to run the Soak workflow once by hand. Fix anything red first.
-2. Ask whether he wants snapshots next (design in section 11) or the benchmarks/GIF first. Do not start snapshots without a go-ahead.
-3. For snapshots: read in full `internal/raft/{node,types,storage}.go`, `internal/storage/wal.go`, `internal/kv/store.go`, `internal/server/server.go`, `internal/chaos/{world,faultstore}.go`, the three raft test files, `api/raftkv.proto` and `internal/rpc/convert.go`. Then do commit 1 (behavior-neutral index-offset refactor) and prove all existing tests still pass.
+2. Confirm the snapshot patch series is applied, `api/raftkvpb` is regenerated, and the full bar (including real Porcupine and the chaos tests) passes locally and in CI.
+3. Ask before starting benchmarks; do not start benchmarks or CheckQuorum without a go-ahead.
 4. Give Ritvik one paste-all block per step (or, in a cloud session, run the full bar yourself and push a branch/PR), then small commits.
 
 ## 14. Critical Things the Next Claude Must Remember

@@ -17,6 +17,7 @@ The point of the project is the evidence. Everything below is a test you can run
 | An acknowledged write is never lost to a crash | A node is crashed at **every** storage operation it performs, both before and after the operation reaches the disk, then must restart from disk alone and converge |
 | The write-ahead log survives torn and corrupt writes | The log file is cut at every byte offset and bit-flipped; recovery must return exactly the records that were fully written, or report corruption |
 | Clients see a linearizable history | 2,000 seeded chaos runs (about 1.1 million operations, with partitions, crashes and lost messages) are recorded and checked with [Porcupine](https://github.com/anishathalye/porcupine). A nightly job runs tens of thousands more on fresh seeds |
+| Snapshots and log compaction are safe | The crash-at-every-storage-operation test also covers saving and installing snapshots; the WAL is cut at every byte offset after a snapshot record; chaos runs snapshot every 20 entries, so slow followers really are brought forward by InstallSnapshot (a 2,000-seed run with the stand-in checker saw about 214,000 snapshots saved and 108,000 InstallSnapshot messages, all linearizable) |
 | The linearizability checker can actually fail | The harness is deliberately broken (reads served from a node's local state; retries applied twice) and the checker must flag both |
 | The tests catch real bugs | Mutation testing: bugs are injected into the real code and the suite must fail (table below) |
 
@@ -83,6 +84,7 @@ flowchart TB
 - Persist-before-reply: terms, votes and log entries reach disk before any message that depends on them leaves the node
 - Exactly-once writes: every request carries `(ClientID, Seq)`, and the replicated state machine deduplicates retries
 - Reads go through the log, so they are linearizable
+- **Snapshots and log compaction:** after every N applied entries (`-snapshot-every`, off by default) a node snapshots the state machine, including the dedup table, and drops the covered log prefix. A follower that has fallen behind the compacted prefix is brought forward with InstallSnapshot
 - gRPC API with a leader-finding client that follows redirects, a CLI, and a Docker Compose setup
 
 ## Run it
@@ -121,6 +123,8 @@ go run ./cmd/raftkv-cli get hello
 go run ./cmd/raftkv-cli cas hello world there
 go run ./cmd/raftkv-cli delete hello
 ```
+
+To exercise compaction, add `-snapshot-every 100` to each node.
 
 Stop the leader with Ctrl+C: the other two elect a new one and reads and writes continue. Restart it and it recovers its term and log from its write-ahead log and catches up. Or run `docker compose up --build` for the same three nodes in containers.
 
@@ -167,11 +171,13 @@ docs/design.md           design decisions, tradeoffs, bugs found
 
 Stated plainly, because they are the first things a reviewer should ask about:
 
-- **No snapshots or log compaction yet.** The log grows without bound and a restart replays all of it. This is the next planned piece of work.
+- **Snapshots are sent whole.** There is no chunking, so a snapshot must fit in one gRPC message (80 MiB limit; the WAL refuses larger ones with `ErrTooLarge`). Taking a snapshot copies the whole state under the node lock, so a very large state stalls the node while it happens.
+- Compaction keeps no trailing entries, so a follower that is even slightly behind the snapshot gets the whole snapshot instead of a few entries.
+- Snapshots are off unless `-snapshot-every` is set. The WAL compacts by rewriting the file and renaming it; on Windows the rename's durability is not verified.
 - **Reads go through the log.** Simple and linearizable, but slower than a leased or ReadIndex read.
 - **Static membership.** Nodes cannot be added or removed at runtime.
 - **No TLS or authentication.**
-- The dedup table keeps one saved result per client (a client has one request in flight), and it is not yet expired.
+- The dedup table keeps one saved result per client (a client has one request in flight), and it is not yet expired, so it still grows with the number of distinct clients (and is carried in every snapshot).
 
 ## Roadmap
 
@@ -180,7 +186,7 @@ Stated plainly, because they are the first things a reviewer should ask about:
 - [x] gRPC API, CLI, Docker Compose cluster
 - [x] Linearizability checking with Porcupine, with the checker validated by breaking the system on purpose
 - [x] PreVote
-- [ ] Snapshots and log compaction
+- [x] Snapshots and log compaction
 - [ ] Benchmarks: throughput, p50/p99 latency, time to elect after a leader dies
 - [ ] CheckQuorum: a leader that loses contact with a majority steps down
 - [ ] Chaos replay visualizer

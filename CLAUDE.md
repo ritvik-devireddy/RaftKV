@@ -10,7 +10,7 @@ A linearizable key-value store on a from-scratch Raft implementation in Go, with
 gofmt -l .                      # must print nothing
 go vet ./...
 go build ./...
-go test -race -count=1 ./...    # the full bar; raft package takes about 45 to 90 s
+go test -race -count=1 ./...    # the full bar; raft package takes about 45 to 150 s
 go test ./test/linearizability -v          # 200 seeded chaos runs
 RAFTKV_CHAOS_SEEDS=2000 go test ./test/linearizability -run TestLinearizableUnderChaos -timeout 1h
 RAFTKV_CHAOS_FIRST_SEED=<n> RAFTKV_CHAOS_SEEDS=1 go test ./test/linearizability -run TestLinearizableUnderChaos -v   # replay one seed
@@ -49,6 +49,7 @@ Concise and plain. Explain design choices briefly, because he needs to explain t
 
 ## Roadmap (see `docs/HANDOFF.md` section 11 for detail)
 
-1. Snapshots and log compaction (design agreed: index-offset refactor first with no behavior change, then storage and WAL support, then `Compact` and `InstallSnapshot`, then server wiring and chaos coverage).
-2. Benchmarks (throughput, p50/p99 latency, time to elect after a leader dies; state hardware and caveats).
-3. CheckQuorum, a chaos replay visualizer, README demo GIF.
+1. Benchmarks (throughput, p50/p99 latency, time to elect after a leader dies; state hardware and caveats).
+2. CheckQuorum, a chaos replay visualizer, README demo GIF.
+
+Done: snapshots and log compaction (see `docs/design.md`).
