@@ -26,6 +26,10 @@ func TestMessagesRoundTripThroughProtobuf(t *testing.T) {
 		{From: 0, To: 1, Payload: raft.AppendEntriesArgs{Term: 3, LeaderID: 0}}, // heartbeat
 		{From: 1, To: 0, Payload: raft.AppendEntriesReply{Term: 3, Success: true, MatchIndex: 6, LastLogIndex: 6}},
 		{From: 1, To: 0, Payload: raft.AppendEntriesReply{Term: 3, Success: false, LastLogIndex: 2}},
+		{From: 0, To: 2, Payload: raft.InstallSnapshotArgs{
+			Term: 4, LeaderID: 0, Snapshot: raft.Snapshot{Index: 1000, Term: 3, Data: []byte("state machine bytes \x00\xff")},
+		}},
+		{From: 0, To: 2, Payload: raft.InstallSnapshotArgs{Term: 4, LeaderID: 0, Snapshot: raft.Snapshot{Index: 1, Term: 1}}}, // empty state
 	}
 	for _, m := range msgs {
 		wire, err := ToProto(m)
@@ -61,6 +65,10 @@ func normalize(m raft.Message) raft.Message {
 				a.Entries[i].Command = nil
 			}
 		}
+		m.Payload = a
+	}
+	if a, ok := m.Payload.(raft.InstallSnapshotArgs); ok && len(a.Snapshot.Data) == 0 {
+		a.Snapshot.Data = nil
 		m.Payload = a
 	}
 	return m

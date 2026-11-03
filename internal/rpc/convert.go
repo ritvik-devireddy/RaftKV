@@ -59,6 +59,14 @@ func ToProto(m raft.Message) (*pb.RaftMessage, error) {
 			MatchIndex:   uint64(p.MatchIndex),
 			LastLogIndex: uint64(p.LastLogIndex),
 		}}
+	case raft.InstallSnapshotArgs:
+		out.Payload = &pb.RaftMessage_InstallSnapshot{InstallSnapshot: &pb.InstallSnapshotRequest{
+			Term:              uint64(p.Term),
+			LeaderId:          int32(p.LeaderID),
+			LastIncludedIndex: uint64(p.Snapshot.Index),
+			LastIncludedTerm:  uint64(p.Snapshot.Term),
+			Data:              p.Snapshot.Data,
+		}}
 	default:
 		return nil, fmt.Errorf("rpc: cannot send payload of type %T", m.Payload)
 	}
@@ -123,6 +131,17 @@ func FromProto(m *pb.RaftMessage) (raft.Message, error) {
 			Success:      r.GetSuccess(),
 			MatchIndex:   raft.Index(r.GetMatchIndex()),
 			LastLogIndex: raft.Index(r.GetLastLogIndex()),
+		}
+	case *pb.RaftMessage_InstallSnapshot:
+		r := p.InstallSnapshot
+		out.Payload = raft.InstallSnapshotArgs{
+			Term:     raft.Term(r.GetTerm()),
+			LeaderID: raft.NodeID(r.GetLeaderId()),
+			Snapshot: raft.Snapshot{
+				Index: raft.Index(r.GetLastIncludedIndex()),
+				Term:  raft.Term(r.GetLastIncludedTerm()),
+				Data:  r.GetData(),
+			},
 		}
 	default:
 		return raft.Message{}, fmt.Errorf("rpc: message has no payload")

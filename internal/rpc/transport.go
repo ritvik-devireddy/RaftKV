@@ -16,7 +16,17 @@ import (
 const (
 	peerQueueSize = 256
 	sendTimeout   = 500 * time.Millisecond
+	// A snapshot can be large, so sending one is allowed to take much longer
+	// than a heartbeat.
+	snapshotSendTimeout = 10 * time.Second
 )
+
+// MaxMessageSize is the largest gRPC message a node will send or accept. A
+// snapshot travels as one message and the write-ahead log stores at most 64 MiB
+// of state machine, so this leaves room for that plus framing. (gRPC's default
+// limit of 4 MiB would silently stop a node with a bigger snapshot from ever
+// catching a lagging follower up.)
+const MaxMessageSize = 80 << 20
 
 // Transport implements raft.Transport over gRPC.
 //
@@ -49,7 +59,9 @@ func NewTransport(self raft.NodeID, addrs map[raft.NodeID]string, log *slog.Logg
 		if id == self {
 			continue
 		}
-		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(MaxMessageSize), grpc.MaxCallRecvMsgSize(MaxMessageSize)))
 		if err != nil {
 			t.Close()
 			return nil, err
@@ -85,7 +97,11 @@ func (t *Transport) drain(p *peer) {
 		case <-t.done:
 			return
 		case m := <-p.queue:
-			ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+			timeout := sendTimeout
+			if m.GetInstallSnapshot() != nil {
+				timeout = snapshotSendTimeout
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			_, err := p.client.Step(ctx, m)
 			cancel()
 			if err != nil && time.Since(lastWarn) > 5*time.Second {

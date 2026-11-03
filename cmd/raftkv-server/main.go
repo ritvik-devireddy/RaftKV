@@ -96,7 +96,7 @@ func main() {
 		log.Error("cannot listen", "addr", *listen, "err", err)
 		os.Exit(1)
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.MaxRecvMsgSize(rpc.MaxMessageSize), grpc.MaxSendMsgSize(rpc.MaxMessageSize))
 	pb.RegisterKVServer(grpcServer, rpc.NewKVService(srv, clientMap, *timeout))
 	pb.RegisterRaftServer(grpcServer, rpc.NewRaftService(srv))
 

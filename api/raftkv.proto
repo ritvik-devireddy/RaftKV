@@ -16,11 +16,10 @@ service KV {
 // Raft is the node-to-node API. The Raft core is message-passing: a vote
 // request and its reply are two independent messages, not a call and its
 // return value, and either may be lost or arrive late. So the wire protocol is
-// one fire-and-forget RPC that carries any of the six message kinds, and the
+// one fire-and-forget RPC that carries any of the seven message kinds, and the
 // receiver feeds it straight into the node.
 service Raft {
   rpc Step(RaftMessage) returns (StepAck);
-  // TODO(snapshots): InstallSnapshot payload
 }
 
 // ---- client API ----
@@ -94,6 +93,7 @@ message RaftMessage {
     AppendEntriesResponse append_entries_reply = 6;
     PreVoteRequest pre_vote = 7;
     PreVoteResponse pre_vote_reply = 8;
+    InstallSnapshotRequest install_snapshot = 9;
   }
 }
 
@@ -138,4 +138,16 @@ message AppendEntriesResponse {
   bool success = 2;
   uint64 match_index = 3;    // last entry the follower verified matches the leader
   uint64 last_log_index = 4; // follower's log length, so the leader can skip back fast
+}
+
+// A leader brings a follower forward with its snapshot when the entries the
+// follower needs have been compacted away. The snapshot travels whole, in one
+// message. The follower answers with an AppendEntriesResponse: success, with
+// match_index = last_included_index.
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  int32 leader_id = 2;
+  uint64 last_included_index = 3; // the snapshot replaces every log entry up to and including this one
+  uint64 last_included_term = 4;  // term of that entry
+  bytes data = 5;                 // the state machine's state as of last_included_index; opaque to Raft
 }
