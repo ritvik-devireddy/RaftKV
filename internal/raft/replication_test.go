@@ -53,28 +53,33 @@ func (c *cluster) onApply(id int, e LogEntry) {
 // hold an entry with the same index and term, the logs are identical up to
 // and including that entry.
 func (c *cluster) checkLogMatching() {
-	logs := make([][]LogEntry, len(c.nodes))
+	views := make([]logView, len(c.nodes))
 	for i := range c.nodes {
-		logs[i] = c.logOf(i)
-		for j, e := range logs[i] {
-			if e.Index != Index(j+1) {
-				c.t.Fatalf("seed %d: node %d has entry %+v at position %d", c.seed, i, e, j+1)
+		views[i] = c.logOf(i)
+		for j, e := range views[i].entries {
+			if want := views[i].snapIndex + Index(j) + 1; e.Index != want {
+				c.t.Fatalf("seed %d: node %d has entry %+v at position %d (snapshot at %d)", c.seed, i, e, j+1, views[i].snapIndex)
 			}
 		}
 	}
-	for a := range logs {
-		for b := a + 1; b < len(logs); b++ {
-			la, lb := logs[a], logs[b]
-			last := -1
-			for i := 0; i < min(len(la), len(lb)); i++ {
-				if la[i].Term == lb[i].Term {
-					last = i
+	// Logs are compared over the indexes both still hold: a node that has
+	// compacted further has simply forgotten the front of its log.
+	for a := range views {
+		for b := a + 1; b < len(views); b++ {
+			va, vb := views[a], views[b]
+			lo := max(va.snapIndex, vb.snapIndex) + 1
+			hi := min(va.last(), vb.last())
+			agree := Index(0) // the highest index in the overlap where the terms match
+			for i := lo; i <= hi; i++ {
+				if va.at(i).Term == vb.at(i).Term {
+					agree = i
 				}
 			}
-			for i := 0; i <= last; i++ {
-				if la[i].Term != lb[i].Term || !bytes.Equal(la[i].Command, lb[i].Command) {
+			for i := lo; i <= agree; i++ {
+				ea, eb := va.at(i), vb.at(i)
+				if ea.Term != eb.Term || !bytes.Equal(ea.Command, eb.Command) {
 					c.t.Fatalf("seed %d: log matching violated between nodes %d and %d at index %d: %+v vs %+v",
-						c.seed, a, b, i+1, la[i], lb[i])
+						c.seed, a, b, i, ea, eb)
 				}
 			}
 		}
@@ -125,14 +130,22 @@ func (c *cluster) requireConverged() {
 		c.t.Fatalf("seed %d: nothing was ever committed", c.seed)
 	}
 	c.requireAllUp()
-	ref := c.nodes[0].logCopy()
-	for id, n := range c.nodes {
+	ref := c.logOf(0)
+	for id := range c.nodes {
 		if got := len(c.applied[id]); got != len(c.global) {
 			c.t.Fatalf("seed %d: node %d applied %d entries but the cluster applied %d: %+v",
 				c.seed, id, got, len(c.global), c.statuses())
 		}
-		if got := n.logCopy(); !reflect.DeepEqual(got, ref) {
-			c.t.Fatalf("seed %d: node %d log differs from node 0:\n%+v\n%+v", c.seed, id, got, ref)
+		// Same last index, and the same entries wherever both nodes still have
+		// them (one may have compacted more of its log than the other).
+		got := c.logOf(id)
+		if got.last() != ref.last() {
+			c.t.Fatalf("seed %d: node %d ends at index %d but node 0 at %d", c.seed, id, got.last(), ref.last())
+		}
+		for i := max(got.snapIndex, ref.snapIndex) + 1; i <= ref.last(); i++ {
+			if !reflect.DeepEqual(got.at(i), ref.at(i)) {
+				c.t.Fatalf("seed %d: node %d differs from node 0 at index %d: %+v vs %+v", c.seed, id, i, got.at(i), ref.at(i))
+			}
 		}
 	}
 }

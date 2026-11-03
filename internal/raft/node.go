@@ -55,8 +55,12 @@ type Node struct {
 	// Leader only, reinitialized after every election (Figure 2).
 	nextIndex  map[NodeID]Index // next log index to send to each peer
 	matchIndex map[NodeID]Index // highest index known to be replicated on each peer
+	// snapSentAt is the tick at which a snapshot was last sent to each peer that
+	// has not answered since, so a big snapshot is not re-sent on every heartbeat.
+	snapSentAt map[NodeID]int
 
 	// Logical timers, measured in ticks.
+	ticks            int // ticks since this node started
 	electionElapsed  int
 	electionTimeout  int
 	heartbeatElapsed int
@@ -71,6 +75,9 @@ type Status struct {
 	CommitIndex  Index
 	LastApplied  Index
 	LastLogIndex Index
+	// SnapshotIndex is the last log index covered by the node's snapshot
+	// (0 if it has none).
+	SnapshotIndex Index
 }
 
 // NewNode creates a node and restores its persistent state from storage.
@@ -88,6 +95,9 @@ func NewNode(cfg Config, storage Storage, transport Transport) (*Node, error) {
 	}
 	if cfg.HeartbeatTick <= 0 {
 		cfg.HeartbeatTick = 2
+	}
+	if cfg.SnapshotEvery > 0 && cfg.Snapshot == nil {
+		return nil, fmt.Errorf("raft: SnapshotEvery is %d but Config.Snapshot is nil", cfg.SnapshotEvery)
 	}
 
 	ps, err := storage.Load()
@@ -116,6 +126,12 @@ func NewNode(cfg Config, storage Storage, transport Transport) (*Node, error) {
 		leaderID:    NoLeader,
 	}
 	n.resetElectionTimer()
+
+	// The snapshot is the state machine's state as of snap.Index; entries after
+	// it are re-applied as the node learns they are committed.
+	if ps.Snapshot.Index > 0 && cfg.Restore != nil {
+		cfg.Restore(ps.Snapshot)
+	}
 	return n, nil
 }
 
@@ -130,6 +146,7 @@ func NewNode(cfg Config, storage Storage, transport Transport) (*Node, error) {
 func (n *Node) Tick() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.ticks++
 
 	if n.role == Leader {
 		n.heartbeatElapsed++
@@ -165,6 +182,8 @@ func (n *Node) Step(msg Message) {
 		n.handleAppendEntries(msg.From, p)
 	case AppendEntriesReply:
 		n.handleAppendEntriesReply(msg.From, p)
+	case InstallSnapshotArgs:
+		n.handleInstallSnapshot(msg.From, p)
 	}
 }
 
@@ -203,6 +222,8 @@ func (n *Node) Status() Status {
 		CommitIndex:  n.commitIndex,
 		LastApplied:  n.lastApplied,
 		LastLogIndex: last,
+
+		SnapshotIndex: n.snap.Index,
 	}
 }
 
@@ -360,6 +381,7 @@ func (n *Node) becomeLeader() {
 	last, _ := n.lastLog()
 	n.nextIndex = make(map[NodeID]Index, len(n.cfg.Peers))
 	n.matchIndex = make(map[NodeID]Index, len(n.cfg.Peers))
+	n.snapSentAt = make(map[NodeID]int)
 	for _, peer := range n.cfg.Peers {
 		if peer != n.cfg.ID {
 			n.nextIndex[peer] = last + 1
@@ -389,6 +411,7 @@ func (n *Node) stepDown(term Term) {
 	n.preVotes = nil
 	n.nextIndex = nil
 	n.matchIndex = nil
+	n.snapSentAt = nil
 	n.resetElectionTimer()
 }
 
@@ -423,6 +446,24 @@ func (n *Node) replicateAll() {
 
 func (n *Node) sendAppendEntries(peer NodeID) {
 	next := n.nextIndex[peer]
+	if next <= n.snap.Index {
+		// The entries this follower needs are gone from our log; all we have for
+		// it is the snapshot that replaced them. A snapshot can be large, so once
+		// one is on its way we do not send another until the follower has had
+		// time to answer. Meanwhile an empty AppendEntries keeps it from timing
+		// out, and also lets it tell us if it turns out to be further along.
+		if at, pending := n.snapSentAt[peer]; pending && n.ticks-at < n.cfg.ElectionTickMax {
+			n.send(peer, AppendEntriesArgs{
+				Term: n.currentTerm, LeaderID: n.cfg.ID,
+				PrevLogIndex: n.snap.Index, PrevLogTerm: n.snap.Term,
+				LeaderCommit: n.commitIndex,
+			})
+			return
+		}
+		n.snapSentAt[peer] = n.ticks
+		n.send(peer, InstallSnapshotArgs{Term: n.currentTerm, LeaderID: n.cfg.ID, Snapshot: n.snap})
+		return
+	}
 	prev := next - 1
 	last, _ := n.lastLog()
 
@@ -455,6 +496,7 @@ func (n *Node) handleAppendEntriesReply(from NodeID, reply AppendEntriesReply) {
 	}
 
 	if reply.Success {
+		delete(n.snapSentAt, from) // it answered, so whatever snapshot we sent is no longer pending
 		// matchIndex only moves forward, so a duplicated or reordered reply
 		// cannot undo progress.
 		if reply.MatchIndex > n.matchIndex[from] {
@@ -524,17 +566,17 @@ func (n *Node) handleAppendEntries(from NodeID, args AppendEntriesArgs) {
 		return
 	}
 
-	// The sender is the legitimate leader of this term.
-	if args.Term > n.currentTerm {
-		n.stepDown(args.Term)
-	} else if n.role == Candidate {
-		// Someone else won this term's election: stop campaigning.
-		n.role = Follower
-		n.votes = nil
+	n.acceptLeader(args.Term, args.LeaderID)
+
+	// The leader is probing inside the part of our log that is now a snapshot.
+	// Everything up to our commit index is committed, so it is identical on
+	// every node that could lead: say how far we are known to agree and let the
+	// leader carry on from there.
+	if args.PrevLogIndex < n.snap.Index {
+		last, _ := n.lastLog()
+		n.send(from, AppendEntriesReply{Term: n.currentTerm, Success: true, MatchIndex: n.commitIndex, LastLogIndex: last})
+		return
 	}
-	n.leaderID = args.LeaderID
-	n.electionElapsed = 0
-	n.preVotes = nil // there is a live leader; stop asking for votes
 
 	// Consistency check (Figure 2, rule 2): our log must contain an entry at
 	// PrevLogIndex whose term matches. If not, say so, and say how long our
@@ -589,7 +631,62 @@ func (n *Node) handleAppendEntries(from NodeID, args AppendEntriesArgs) {
 	})
 }
 
-// applyCommitted passes newly committed entries to the state machine, in order.
+// acceptLeader is what a node does on hearing from the legitimate leader of a
+// term that is at least its own, whether the message is entries or a snapshot.
+func (n *Node) acceptLeader(term Term, leader NodeID) {
+	if term > n.currentTerm {
+		n.stepDown(term)
+	} else if n.role == Candidate {
+		// Someone else won this term's election: stop campaigning.
+		n.role = Follower
+		n.votes = nil
+	}
+	n.leaderID = leader
+	n.electionElapsed = 0
+	n.preVotes = nil // there is a live leader; stop asking for votes
+}
+
+// handleInstallSnapshot replaces this node's state with a leader's snapshot.
+func (n *Node) handleInstallSnapshot(from NodeID, args InstallSnapshotArgs) {
+	if args.Term < n.currentTerm {
+		n.send(from, AppendEntriesReply{Term: n.currentTerm, Success: false})
+		return
+	}
+	if n.role == Leader && args.Term == n.currentTerm {
+		return // cannot happen (election safety); do not let another "leader" touch us
+	}
+	n.acceptLeader(args.Term, args.LeaderID)
+
+	snap := args.Snapshot
+	if snap.Index > n.commitIndex {
+		// Storage first, memory second, as for every other change. The state
+		// machine is replaced wholesale: it may be behind, or it may hold
+		// entries the snapshot supersedes.
+		n.must(n.storage.SaveSnapshot(snap), "save snapshot")
+		n.adoptSnapshot(snap)
+		if n.cfg.Restore != nil {
+			n.cfg.Restore(snap)
+		}
+		n.commitIndex, n.lastApplied = snap.Index, snap.Index
+	}
+	// Otherwise we already have everything the snapshot covers (a duplicate, a
+	// retransmission, or one that raced with entries): nothing to do but answer.
+
+	last, _ := n.lastLog()
+	n.send(from, AppendEntriesReply{Term: n.currentTerm, Success: true, MatchIndex: snap.Index, LastLogIndex: last})
+}
+
+// adoptSnapshot makes snap this node's snapshot in memory and drops the log
+// entries it covers. The storage must already hold it. It uses the same rule as
+// the storage, so memory and disk cannot disagree.
+func (n *Node) adoptSnapshot(snap Snapshot) {
+	ps := PersistentState{Snapshot: n.snap, Log: n.log}
+	ps.ApplySnapshot(snap)
+	n.snap, n.log = ps.Snapshot, ps.Log
+}
+
+// applyCommitted passes newly committed entries to the state machine, in order,
+// and compacts the log if enough have piled up.
 func (n *Node) applyCommitted() {
 	for n.lastApplied < n.commitIndex {
 		n.lastApplied++
@@ -597,6 +694,22 @@ func (n *Node) applyCommitted() {
 			n.cfg.Apply(n.entryAt(n.lastApplied))
 		}
 	}
+	n.maybeCompact()
+}
+
+// maybeCompact takes a snapshot of the state machine, which at this moment has
+// applied exactly the entries up to lastApplied, once SnapshotEvery entries have
+// been applied since the last one. Everything runs under the node's lock, so the
+// state machine cannot move while it is serialized. (That also means a large
+// state machine stalls the node while it is saved; a production system would
+// snapshot copy-on-write in the background.)
+func (n *Node) maybeCompact() {
+	if n.cfg.SnapshotEvery <= 0 || n.lastApplied-n.snap.Index < Index(n.cfg.SnapshotEvery) {
+		return
+	}
+	snap := Snapshot{Index: n.lastApplied, Term: n.termAt(n.lastApplied), Data: n.cfg.Snapshot()}
+	n.must(n.storage.SaveSnapshot(snap), "save snapshot")
+	n.adoptSnapshot(snap)
 }
 
 // ---- helpers ----

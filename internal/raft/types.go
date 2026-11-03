@@ -88,6 +88,24 @@ type Config struct {
 	// including no-op entries (see LogEntry.IsNoOp). It runs with the node's
 	// lock held, so it must be quick and must not call back into the node.
 	Apply func(LogEntry)
+
+	// Log compaction. When SnapshotEvery is positive, a node that has applied
+	// that many entries since its last snapshot asks the state machine for a
+	// snapshot, saves it, and drops the log entries it covers. Zero disables
+	// compaction. Each node compacts on its own, without coordinating.
+	SnapshotEvery int
+	// Snapshot returns the state machine's state after every entry passed to
+	// Apply so far (and nothing later). Required if SnapshotEvery is positive.
+	// Like Apply, it runs with the node's lock held and must not call back into
+	// the node.
+	Snapshot func() []byte
+	// Restore replaces the state machine's state with a snapshot's data (see
+	// Snapshot), on this node or on the leader. It is called when the node
+	// starts with a saved snapshot (before any Apply) and when a leader's
+	// snapshot is installed. After it returns, the next entry passed to Apply
+	// is snap.Index+1. Same restrictions as Apply. May be nil if the node has no
+	// state machine to restore (some tests).
+	Restore func(snap Snapshot)
 }
 
 // ---- RPC payloads (Raft paper, Figure 2) ----
@@ -149,8 +167,20 @@ type AppendEntriesReply struct {
 	LastLogIndex Index
 }
 
+// InstallSnapshotArgs is how a leader brings a follower forward when the entries
+// the follower needs have been compacted out of the leader's log. The snapshot
+// travels whole, in one message (Raft paper section 7 describes chunking; this
+// implementation does not do it). The follower answers with an
+// AppendEntriesReply: success and MatchIndex = Snapshot.Index, the same way it
+// acknowledges entries. Snapshot.Data must be treated as immutable.
+type InstallSnapshotArgs struct {
+	Term     Term
+	LeaderID NodeID
+	Snapshot Snapshot
+}
+
 // Message is the envelope the Transport carries. Payload is one of the RPC
-// types above.
+// types above (by value).
 type Message struct {
 	From    NodeID
 	To      NodeID

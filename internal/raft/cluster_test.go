@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"bytes"
+	"encoding/gob"
 	"math/rand"
 	"testing"
 	"time"
@@ -13,9 +15,19 @@ import (
 
 const tickDuration = 10 * time.Millisecond
 
-type simTransport struct{ net *simnet.Network }
+// simTransport sends over the simulated network and counts the snapshots sent,
+// so tests can check that a scenario really exercised InstallSnapshot.
+type simTransport struct {
+	net       *simnet.Network
+	snapshots *int
+}
 
-func (s simTransport) Send(m Message) { s.net.Send(int(m.From), int(m.To), m) }
+func (s simTransport) Send(m Message) {
+	if _, ok := m.Payload.(InstallSnapshotArgs); ok {
+		*s.snapshots++
+	}
+	s.net.Send(int(m.From), int(m.To), m)
+}
 
 type cluster struct {
 	t     *testing.T
@@ -44,23 +56,39 @@ type cluster struct {
 	crashRate float64         // per node per tick chance of a crash; 0 disables
 
 	durableChecks int
+
+	// Snapshots. With snapEvery > 0 every node compacts its log after that many
+	// applied entries. A node's "state machine" is the list of entries it has
+	// applied, and a snapshot is that list, which makes every property of the
+	// applied history checkable after a restore.
+	snapEvery     int
+	snapshotsSent int // InstallSnapshot messages sent
+	restores      int // times a state machine was restored from a snapshot
 }
 
 func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *cluster {
 	t.Helper()
+	return newClusterWithSnapshots(t, size, seed, netCfg, 0)
+}
+
+// newClusterWithSnapshots is newCluster with log compaction every snapEvery
+// applied entries (0 = never).
+func newClusterWithSnapshots(t *testing.T, size int, seed int64, netCfg simnet.Config, snapEvery int) *cluster {
+	t.Helper()
 	netCfg.Seed = seed
 	c := &cluster{
-		t:        t,
-		seed:     seed,
-		net:      simnet.New(netCfg),
-		leaders:  make(map[Term]map[NodeID]bool),
-		applied:  make([][]LogEntry, size),
-		global:   make(map[Index]LogEntry),
-		proposed: make(map[string]bool),
-		storages: make([]*crashStorage, size),
-		down:     make([]int, size),
-		gen:      make([]int, size),
-		rng:      rand.New(rand.NewSource(seed*31 + 7)),
+		t:         t,
+		seed:      seed,
+		net:       simnet.New(netCfg),
+		leaders:   make(map[Term]map[NodeID]bool),
+		applied:   make([][]LogEntry, size),
+		global:    make(map[Index]LogEntry),
+		proposed:  make(map[string]bool),
+		storages:  make([]*crashStorage, size),
+		snapEvery: snapEvery,
+		down:      make([]int, size),
+		gen:       make([]int, size),
+		rng:       rand.New(rand.NewSource(seed*31 + 7)),
 	}
 
 	peers := make([]NodeID, size)
@@ -71,7 +99,7 @@ func newCluster(t *testing.T, size int, seed int64, netCfg simnet.Config) *clust
 	for i := 0; i < size; i++ {
 		id := i
 		c.storages[id] = newCrashStorage()
-		n, err := NewNode(c.nodeConfig(id), c.storages[id], simTransport{c.net})
+		n, err := NewNode(c.nodeConfig(id), c.storages[id], simTransport{c.net, &c.snapshotsSent})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +127,47 @@ func (c *cluster) nodeConfig(id int) Config {
 		HeartbeatTick:   2,
 		Seed:            c.seed + int64(c.gen[id])*7919,
 		Apply:           func(e LogEntry) { c.onApply(id, e) },
+
+		SnapshotEvery: c.snapEvery,
+		Snapshot:      func() []byte { return encodeApplied(c.applied[id]) },
+		Restore:       func(snap Snapshot) { c.onRestore(id, snap) },
 	}
+}
+
+func encodeApplied(es []LogEntry) []byte {
+	var b bytes.Buffer
+	if err := gob.NewEncoder(&b).Encode(es); err != nil {
+		panic(err)
+	}
+	return b.Bytes()
+}
+
+func decodeApplied(data []byte) ([]LogEntry, error) {
+	var es []LogEntry
+	err := gob.NewDecoder(bytes.NewReader(data)).Decode(&es)
+	return es, err
+}
+
+// onRestore replaces node id's state machine with a snapshot. Every entry in it
+// must be one some node really applied, in order from index 1.
+func (c *cluster) onRestore(id int, snap Snapshot) {
+	es, err := decodeApplied(snap.Data)
+	if err != nil {
+		c.t.Fatalf("seed %d: node %d was given a snapshot that does not decode: %v", c.seed, id, err)
+	}
+	for i, e := range es {
+		if e.Index != Index(i+1) {
+			c.t.Fatalf("seed %d: node %d restored entry %+v at position %d", c.seed, id, e, i+1)
+		}
+		if g, ok := c.global[e.Index]; !ok || g.Term != e.Term || !bytes.Equal(g.Command, e.Command) {
+			c.t.Fatalf("seed %d: node %d restored entry %+v that the cluster never applied (global: %+v)", c.seed, id, e, g)
+		}
+	}
+	if Index(len(es)) != snap.Index {
+		c.t.Fatalf("seed %d: node %d restored %d entries from a snapshot at index %d", c.seed, id, len(es), snap.Index)
+	}
+	c.applied[id] = es
+	c.restores++
 }
 
 // observe checks Election Safety (Raft paper, Figure 3): at most one leader

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"reflect"
@@ -118,7 +119,7 @@ func (c *cluster) restart(id int) {
 	// The state machine restarts empty too and is fed the log again as the
 	// node learns what is committed.
 	c.applied[id] = nil
-	n, err := NewNode(c.nodeConfig(id), c.storages[id], simTransport{c.net})
+	n, err := NewNode(c.nodeConfig(id), c.storages[id], simTransport{c.net, &c.snapshotsSent})
 	if err != nil {
 		c.t.Fatalf("seed %d: node %d failed to restart: %v", c.seed, id, err)
 	}
@@ -137,34 +138,50 @@ func (c *cluster) maybeCrash(id int) {
 	c.storages[id].armIn(1+c.rng.Intn(3), c.rng.Intn(2) == 0)
 }
 
-// logOf is node i's log as it would be after a restart: the live log for a
-// running node, the disk for a crashed one.
-func (c *cluster) logOf(i int) []LogEntry {
-	if c.down[i] > 0 {
-		ps, _ := c.storages[i].Load()
-		return ps.Log
-	}
-	return c.nodes[i].logCopy()
+// logView is a node's log together with how much of its front is a snapshot.
+type logView struct {
+	snapIndex Index
+	snapTerm  Term
+	entries   []LogEntry // entries[i] has index snapIndex+1+i
 }
 
-// summary reads a storage's term, vote, log length and last entry without
-// copying the log.
-func (s *crashStorage) summary() (term Term, vote NodeID, n int, last LogEntry) {
+func (v logView) last() Index { return v.snapIndex + Index(len(v.entries)) }
+
+// at returns the entry with the given index, which must be in v.entries.
+func (v logView) at(i Index) LogEntry { return v.entries[i-v.snapIndex-1] }
+
+// logOf is node i's log as it would be after a restart: the live log for a
+// running node, the disk for a crashed one.
+func (c *cluster) logOf(i int) logView {
+	if c.down[i] > 0 {
+		ps, _ := c.storages[i].Load()
+		return logView{ps.Snapshot.Index, ps.Snapshot.Term, ps.Log}
+	}
+	n := c.nodes[i]
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return logView{n.snap.Index, n.snap.Term, append([]LogEntry(nil), n.log...)}
+}
+
+// summary reads a storage's term, vote, snapshot, log length and last entry
+// without copying the log.
+func (s *crashStorage) summary() (term Term, vote NodeID, snapIndex Index, n int, last LogEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.state
 	if len(st.Log) > 0 {
 		last = st.Log[len(st.Log)-1]
 	}
-	return st.CurrentTerm, st.VotedFor, len(st.Log), last
+	return st.CurrentTerm, st.VotedFor, st.Snapshot.Index, len(st.Log), last
 }
 
 // checkDurable asserts that nothing a running node believes is missing from
 // its disk. If the node crashed right now, it would come back with exactly
 // what it had. This is what "persist before you reply" means.
 //
-// Every call compares term, vote, log length and the last entry; every 25th
-// call compares the whole log, which is much more expensive.
+// Every call compares term, vote, snapshot index, log length and the last
+// entry; every 25th call compares the whole log and snapshot, which is much
+// more expensive.
 func (c *cluster) checkDurable() {
 	c.durableChecks++
 	full := c.durableChecks%25 == 0
@@ -172,22 +189,29 @@ func (c *cluster) checkDurable() {
 		if c.down[id] > 0 {
 			continue
 		}
-		dTerm, dVote, dLen, dLast := c.storages[id].summary()
+		dTerm, dVote, dSnap, dLen, dLast := c.storages[id].summary()
 		n.mu.Lock()
-		term, vote, length := n.currentTerm, n.votedFor, len(n.log)
+		term, vote, snap, length := n.currentTerm, n.votedFor, n.snap.Index, len(n.log)
 		var last LogEntry
 		if length > 0 {
 			last = n.log[length-1]
 		}
 		n.mu.Unlock()
-		if dTerm != term || dVote != vote || dLen != length || !reflect.DeepEqual(dLast, last) {
-			c.t.Fatalf("seed %d: node %d memory and disk disagree:\n memory term=%d vote=%d len=%d last=%+v\n disk   term=%d vote=%d len=%d last=%+v",
-				c.seed, id, term, vote, length, last, dTerm, dVote, dLen, dLast)
+		if dTerm != term || dVote != vote || dSnap != snap || dLen != length || !reflect.DeepEqual(dLast, last) {
+			c.t.Fatalf("seed %d: node %d memory and disk disagree:\n memory term=%d vote=%d snapshot=%d len=%d last=%+v\n disk   term=%d vote=%d snapshot=%d len=%d last=%+v",
+				c.seed, id, term, vote, snap, length, last, dTerm, dVote, dSnap, dLen, dLast)
 		}
 		if full {
 			ps, _ := c.storages[id].Load()
-			if got := n.logCopy(); len(got)+len(ps.Log) > 0 && !reflect.DeepEqual(ps.Log, got) {
-				c.t.Fatalf("seed %d: node %d log differs from its disk:\n memory %+v\n disk   %+v", c.seed, id, got, ps.Log)
+			n.mu.Lock()
+			memSnap, memLog := n.snap, append([]LogEntry(nil), n.log...)
+			n.mu.Unlock()
+			if len(memLog)+len(ps.Log) > 0 && !reflect.DeepEqual(ps.Log, memLog) {
+				c.t.Fatalf("seed %d: node %d log differs from its disk:\n memory %+v\n disk   %+v", c.seed, id, memLog, ps.Log)
+			}
+			if memSnap.Index != ps.Snapshot.Index || memSnap.Term != ps.Snapshot.Term || !bytes.Equal(memSnap.Data, ps.Snapshot.Data) {
+				c.t.Fatalf("seed %d: node %d snapshot differs from its disk:\n memory %d/%d (%d bytes)\n disk   %d/%d (%d bytes)",
+					c.seed, id, memSnap.Index, memSnap.Term, len(memSnap.Data), ps.Snapshot.Index, ps.Snapshot.Term, len(ps.Snapshot.Data))
 			}
 		}
 	}
@@ -284,14 +308,46 @@ func TestSafetyUnderCrashesAndPartitions(t *testing.T) {
 // after the operation reaches the disk. The first run counts the operations;
 // then each one is crashed in turn.
 func TestCrashAtEveryStorageOperation(t *testing.T) {
-	scenario := func(c *cluster) {
+	crashAtEveryOperation(t, 0, func(c *cluster) {
 		c.run(80)
 		for i := 0; i < 12; i++ {
 			c.propose()
 			c.run(4)
 		}
 		c.run(60)
-	}
+	})
+}
+
+// The same with log compaction on, so saving a snapshot is one of the
+// operations that gets interrupted, before and after it reaches the disk.
+func TestCrashAtEveryStorageOperationWithSnapshots(t *testing.T) {
+	crashAtEveryOperation(t, 4, func(c *cluster) {
+		c.run(80)
+		for i := 0; i < 16; i++ {
+			c.propose()
+			c.run(4)
+		}
+		c.run(60)
+	})
+}
+
+// And with a follower that falls behind the leader's compaction and has to be
+// brought forward by InstallSnapshot, which is the other way a snapshot reaches
+// disk.
+func TestCrashAtEveryStorageOperationWhileInstallingASnapshot(t *testing.T) {
+	crashAtEveryOperation(t, 4, func(c *cluster) {
+		c.run(80)
+		c.net.Partition([]int{2}, []int{0, 1})
+		for i := 0; i < 16; i++ {
+			c.propose()
+			c.run(4)
+		}
+		c.net.Heal()
+		c.run(150)
+	})
+}
+
+func crashAtEveryOperation(t *testing.T, snapEvery int, scenario func(*cluster)) {
 	finish := func(c *cluster) {
 		c.run(400)
 		c.requireAllUp()
@@ -302,8 +358,11 @@ func TestCrashAtEveryStorageOperation(t *testing.T) {
 	}
 
 	for seed := int64(1); seed <= 3; seed++ {
-		probe := newCluster(t, 3, seed, baseNet)
+		probe := newClusterWithSnapshots(t, 3, seed, baseNet, snapEvery)
 		scenario(probe)
+		if snapEvery > 0 && probe.restores+probe.snapshotsSent == 0 && probe.nodes[0].Status().SnapshotIndex == 0 {
+			t.Fatalf("seed %d: the scenario never took a snapshot", seed)
+		}
 		for victim := 0; victim < 3; victim++ {
 			total := probe.storages[victim].ops
 			if total == 0 {
@@ -312,7 +371,7 @@ func TestCrashAtEveryStorageOperation(t *testing.T) {
 			for op := 1; op <= total; op++ {
 				for _, applyOp := range []bool{false, true} {
 					t.Run(fmt.Sprintf("seed%d/node%d/op%d/applied=%v", seed, victim, op, applyOp), func(t *testing.T) {
-						c := newCluster(t, 3, seed, baseNet)
+						c := newClusterWithSnapshots(t, 3, seed, baseNet, snapEvery)
 						c.storages[victim].armAt(op, applyOp)
 						scenario(c)
 						finish(c)
